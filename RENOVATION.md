@@ -7,36 +7,36 @@ quotes; validate them locally before deciding.
 
 ## The big cost drivers
 
-- **Fixtures (infissi)**: windows and external doors.
-- **Systems (impianti)**: electrical and plumbing. Replacing them means
-  opening walls and floors, and surprises come with that (for example works
-  spilling into the public sidewalk). Only a complete renovation covers
-  this.
+- **Fixtures**: windows and external doors.
+- **Systems**: electrical and plumbing. Replacing them means opening walls
+  and floors, and surprises come with that (for example works spilling into
+  the public sidewalk). Only a complete renovation covers this.
 - **What to buy for**: location, a semi-independent unit, and space.
 
 ## Work classification
 
-The classification of the works decides the permit process, the
-professionals involved, and the cost per square meter. The geometra's fee
-is a percentage tied to the work classification and the floor area.
+Italian building law classifies renovation works, and the classification
+decides the permit process, the professionals involved, and the cost per
+square meter. The surveyor's fee is a percentage tied to the work
+classification and the floor area.
 
-### Ordinary maintenance (manutenzione ordinaria)
+### Ordinary maintenance
 
 - No gutting, no touching load-bearing walls.
 - The cheap path: roughly 500-1,000 EUR/m2.
 - Rule of thumb: buying new construction costs more; maintaining an
   existing unit costs less.
 
-### Extraordinary maintenance (manutenzione straordinaria)
+### Extraordinary maintenance
 
-- Different, heavier permit process with the Comune.
+- Different, heavier permit process with the municipality.
 - Who runs the paperwork:
-  - **Geometra**: fastest; quote possibly lump-sum; legally required works
+  - **Surveyor**: fastest; quote possibly lump-sum; legally required works
     supervision; around 15-20k EUR.
   - **Architect**: for the municipal side.
   - **Engineer**: broadest scope.
-- Budget around 25k EUR combined for the geometra and the municipal
-  development charges (oneri comunali).
+- Budget around 25k EUR combined for the surveyor and the municipal
+  development charges.
 - Use a registered building company, not a solo mason, and nothing off the
   books: roughly 2,000 EUR/m2, roof excluded. The roof alone is around
   20k EUR.
