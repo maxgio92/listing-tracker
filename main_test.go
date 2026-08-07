@@ -112,6 +112,19 @@ func TestRowChanged(t *testing.T) {
 	}
 }
 
+func TestA1Sheet(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"Listings", "'Listings'"},
+		{"My Tab", "'My Tab'"},
+		{"O'Brien", "'O''Brien'"},
+	}
+	for _, tt := range tests {
+		if got := a1Sheet(tt.in); got != tt.want {
+			t.Errorf("a1Sheet(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestDecodeSheetRows(t *testing.T) {
 	got := decodeSheetRows([][]any{
 		{"https://x/1/", "Shop", json.Number("150000"), json.Number("88"), "Sample Street"},

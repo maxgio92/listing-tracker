@@ -1,14 +1,8 @@
 // Track immobiliare.it listings in a Google Sheet.
 //
-// Subcommands:
-//
-//	sync: search immobiliare.it and upsert listings: URLs not in column A
-//	are appended, rows whose title, price, surface, or address changed are
-//	updated in place.
-//	import: upsert rows from a TSV/CSV file on disk into the sheet, same
-//	keying. See import.go.
-//
-// "watch" and "push" remain as deprecated aliases.
+// The sync subcommand searches immobiliare.it and upserts listings: URLs not
+// in column A are appended, rows whose title, price, surface, or address
+// changed are updated in place. "watch" remains as a deprecated alias.
 //
 // City, price, size, building type, spreadsheet, and tab are flags; there is
 // no default city or spreadsheet.
@@ -429,6 +423,25 @@ func rowChanged(sheet, fetched row) (bool, string) {
 	return len(diffs) > 0, strings.Join(diffs, ", ")
 }
 
+type update struct {
+	rowNum int
+	r      row
+}
+
+// updateRows overwrites A<n>:F<n> for each update in one batchUpdate call.
+func updateRows(token, spreadsheetID, sheetName string, updates []update) error {
+	data := make([]map[string]any, 0, len(updates))
+	for _, u := range updates {
+		data = append(data, map[string]any{
+			"range":  fmt.Sprintf("%s!A%d:F%d", a1Sheet(sheetName), u.rowNum, u.rowNum),
+			"values": [][]any{rowValues(u.r)},
+		})
+	}
+	u := fmt.Sprintf("https://sheets.googleapis.com/v4/spreadsheets/%s/values:batchUpdate", spreadsheetID)
+	body := map[string]any{"valueInputOption": "USER_ENTERED", "data": data}
+	return httpJSON(u, token, body, http.MethodPost, &struct{}{})
+}
+
 // rowValues renders a row as sheet cells A:F; column F carries the
 // price-per-m2 formula used by the existing rows.
 func rowValues(r row) []any {
@@ -535,23 +548,18 @@ func syncCmd(args []string) error {
 func main() {
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: listing-tracker <sync|import> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: listing-tracker sync [flags]")
 		os.Exit(2)
 	}
 	var err error
 	switch args[0] {
 	case "sync":
 		err = syncCmd(args[1:])
-	case "import":
-		err = importCmd(args[1:])
 	case "watch": // deprecated alias for sync
 		fmt.Fprintln(os.Stderr, "note: \"watch\" is deprecated, use \"sync\"")
 		err = syncCmd(args[1:])
-	case "push": // deprecated alias for import
-		fmt.Fprintln(os.Stderr, "note: \"push\" is deprecated, use \"import\"")
-		err = importCmd(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\nusage: listing-tracker <sync|import> [flags]\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\nusage: listing-tracker sync [flags]\n", args[0])
 		os.Exit(2)
 	}
 	if err != nil {

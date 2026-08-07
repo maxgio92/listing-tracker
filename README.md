@@ -2,13 +2,11 @@
 
 Tracks immobiliare.it real-estate listings in a Google Sheet. Go, stdlib only.
 
-Two subcommands:
+One subcommand:
 
 - **sync**: queries immobiliare.it's search API for a city and upserts the
   results into a sheet tab, keyed by listing URL. Unknown URLs are appended;
   rows whose title, price, surface, or address changed are updated in place;
-- **import**: upserts rows from a TSV/CSV file on disk into the sheet, same
-  keying. The file wins for every URL it contains.
 
 ## Setup
 
@@ -29,9 +27,6 @@ Two subcommands:
 ./listing-tracker sync --city Bologna --category residential \
   --max-price 150000 --min-size 80 \
   --spreadsheet <ID> --tab Listings --account you@example.com
-
-# import rows from a file (columns: URL, Title, Price, Surface, Address)
-./listing-tracker import --spreadsheet <ID> --tab Listings data.tsv
 ```
 
 `--spreadsheet` accepts a bare ID or a full docs.google.com URL. `--account`
