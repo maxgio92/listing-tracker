@@ -59,3 +59,9 @@ never touched. E2E tests skip when their environment variables are unset.
 The immobiliare.it search API is unofficial and sits behind bot protection.
 It works unauthenticated today, but it can change or be blocked without
 notice; the sync runs will start failing in the log if that happens.
+
+## Renovation costs
+
+[RENOVATION.md](RENOVATION.md) is a companion guide for estimating the full
+cost of a listing (purchase, agency, works) when the goal is converting a
+commercial property into an apartment in Italy.
