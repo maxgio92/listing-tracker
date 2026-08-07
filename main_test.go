@@ -37,23 +37,13 @@ func TestParseSpreadsheetID(t *testing.T) {
 	}
 }
 
-func TestNormalizeSurface(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{"88 m²", "88"},
-		{"1.234 m²", "1234"},
-		{"1.234,5 m²", "1234.5"},
-		{"96,5 m²", "96.5"},
-		{"", "n/a"},
-		{"m²", "n/a"},
-		{"  215 m² ", "215"},
+func TestSyncCmdRejectsUnknownPlatform(t *testing.T) {
+	err := syncCmd([]string{"--platform", "nope", "--city", "X", "--spreadsheet", "Y"})
+	if err == nil {
+		t.Fatal("syncCmd with unknown platform: want error, got nil")
 	}
-	for _, tt := range tests {
-		if got := normalizeSurface(tt.in); got != tt.want {
-			t.Errorf("normalizeSurface(%q) = %q, want %q", tt.in, got, tt.want)
-		}
+	if got, want := err.Error(), `unknown --platform "nope" (available: immobiliare)`; got != want {
+		t.Errorf("error = %q, want %q", got, want)
 	}
 }
 
@@ -159,75 +149,5 @@ func TestDecodeSheetRows(t *testing.T) {
 	}
 	if nils := got["https://x/3"]; nils.rowNum != 6 || nils.r.title != "" {
 		t.Errorf("nil-cells row = %+v, want rowNum 6 and empty cells", nils)
-	}
-}
-
-func TestBuildSearchParams(t *testing.T) {
-	g := geo{region: "reg", province: "PR", comune: "1234", keyurl: "sampletown"}
-
-	tests := []struct {
-		name            string
-		opts            options
-		wantParamsCount string
-		wantPath        string
-		wantSet         map[string]string
-		wantUnset       []string
-	}{
-		{
-			name:            "defaults",
-			opts:            options{buildingType: "commercial", maxPrice: 200000, minSize: 60},
-			wantParamsCount: "2",
-			wantPath:        "/vendita-negozi/sampletown/",
-			wantSet: map[string]string{
-				"prezzoMassimo":    "200000",
-				"superficieMinima": "60",
-				"idCategoria":      "26",
-				"idContratto":      "1",
-				"idComune":         "1234",
-			},
-			wantUnset: []string{"prezzoMinimo", "superficieMassima"},
-		},
-		{
-			name: "all filters residential",
-			opts: options{
-				buildingType: "residential",
-				maxPrice:     150000, minPrice: 50000, minSize: 80, maxSize: 120,
-			},
-			wantParamsCount: "4",
-			wantPath:        "/vendita-case/sampletown/",
-			wantSet: map[string]string{
-				"prezzoMinimo":      "50000",
-				"superficieMassima": "120",
-				"idCategoria":       "1",
-			},
-		},
-		{
-			name:            "zero disables all filters",
-			opts:            options{buildingType: "commercial"},
-			wantParamsCount: "0",
-			wantPath:        "/vendita-negozi/sampletown/",
-			wantUnset:       []string{"prezzoMassimo", "prezzoMinimo", "superficieMinima", "superficieMassima"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			params := buildSearchParams(tt.opts, g)
-			if got := params.Get("paramsCount"); got != tt.wantParamsCount {
-				t.Errorf("paramsCount = %q, want %q", got, tt.wantParamsCount)
-			}
-			if got := params.Get("path"); got != tt.wantPath {
-				t.Errorf("path = %q, want %q", got, tt.wantPath)
-			}
-			for k, want := range tt.wantSet {
-				if got := params.Get(k); got != want {
-					t.Errorf("%s = %q, want %q", k, got, want)
-				}
-			}
-			for _, k := range tt.wantUnset {
-				if params.Has(k) {
-					t.Errorf("%s should be unset, got %q", k, params.Get(k))
-				}
-			}
-		})
 	}
 }

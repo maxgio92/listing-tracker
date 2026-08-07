@@ -4,9 +4,11 @@ Tracks immobiliare.it real-estate listings in a Google Sheet. Go, stdlib only.
 
 One subcommand:
 
-- **sync**: queries immobiliare.it's search API for a city and upserts the
+- **sync**: queries a listing platform's search API for a city and upserts the
   results into a sheet tab, keyed by listing URL. Unknown URLs are appended;
-  rows whose title, price, surface, or address changed are updated in place;
+  rows whose title, price, surface, or address changed are updated in place.
+  `--platform` selects the platform (default `immobiliare`, currently the only
+  one); an unknown value fails with the list of available platforms.
 
 ## Setup
 
@@ -48,6 +50,21 @@ E2E_CITY=<city> E2E_SPREADSHEET_ID=<ID> go test -tags e2e ./...
 
 The e2e Sheets test creates and deletes a temporary tab; existing tabs are
 never touched. E2E tests skip when their environment variables are unset.
+
+## Adding a provider
+
+Platforms implement the `provider` interface in `main.go`:
+
+```go
+type provider interface {
+	search(city string, f filters) ([]row, error)
+}
+```
+
+Add a new file (like `immobiliare.go`) with a type whose `search` method
+resolves the city on the platform, applies the `filters`, and returns `row`
+values, then register it in the `providers` map in `main.go`. Nothing else
+changes: `--platform <name>` picks it up.
 
 ## Caveats
 

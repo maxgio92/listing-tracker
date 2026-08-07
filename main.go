@@ -1,6 +1,7 @@
-// Track immobiliare.it listings in a Google Sheet.
+// Track real-estate listings in a Google Sheet.
 //
-// The sync subcommand searches immobiliare.it and upserts listings: URLs not
+// The sync subcommand searches a listing platform (--platform, default
+// immobiliare) and upserts listings: URLs not
 // in column A are appended, rows whose title, price, surface, or address
 // changed are updated in place. "watch" remains as a deprecated alias.
 //
@@ -23,10 +24,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 )
@@ -34,15 +34,32 @@ import (
 const (
 	defaultTab = "Listings"
 
-	api          = "https://www.immobiliare.it/api-next/search-list/listings/"
-	autocomplete = "https://www.immobiliare.it/api-next/geography/autocomplete/"
-	userAgent    = "Mozilla/5.0 (X11; Linux x86_64) listing-tracker/1.0"
+	userAgent = "Mozilla/5.0 (X11; Linux x86_64) listing-tracker/1.0"
 )
 
-// idCategoria and URL path segment per building type.
-var categories = map[string][2]string{
-	"commercial":  {"26", "negozi"}, // API category 26, URL segment "negozi" (shops)
-	"residential": {"1", "case"},    // API category 1, URL segment "case" (homes)
+// filters narrows a listing search; zero values disable the numeric bounds.
+type filters struct {
+	category                             string
+	minPrice, maxPrice, minSize, maxSize int
+}
+
+// provider searches one listing platform and returns the matching rows.
+type provider interface {
+	search(city string, f filters) ([]row, error)
+}
+
+var providers = map[string]provider{
+	"immobiliare": immobiliareProvider{},
+}
+
+// providerNames returns the registered platform names, sorted.
+func providerNames() []string {
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -135,131 +152,14 @@ func gcloudToken(account string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-type geoParent struct {
-	Type   int    `json:"type"`
-	ID     string `json:"id"`
-	Label  string `json:"label"`
-	Keyurl string `json:"keyurl"`
-}
-
-type geoEntry struct {
-	Parents []geoParent `json:"parents"`
-}
-
-// geo identifies a comune on immobiliare.it.
-type geo struct {
-	region   string
-	province string
-	comune   string
-	keyurl   string
-}
-
-func resolveCity(name string) (geo, error) {
-	q := url.Values{
-		"macrozones": {"1"},
-		"min_level":  {"9"},
-		"query":      {name},
-		"__lang":     {"it"},
-	}
-	var entries []geoEntry
-	if err := httpJSON(autocomplete+"?"+q.Encode(), "", nil, http.MethodGet, &entries); err != nil {
-		return geo{}, err
-	}
-	for _, entry := range entries {
-		parents := map[int]geoParent{}
-		for _, p := range entry.Parents {
-			parents[p.Type] = p
-		}
-		comune, ok2 := parents[2]
-		_, ok1 := parents[1]
-		_, ok0 := parents[0]
-		if ok2 && ok1 && ok0 && strings.EqualFold(comune.Label, name) {
-			return geo{
-				region:   parents[0].ID,
-				province: parents[1].ID,
-				comune:   comune.ID,
-				keyurl:   strings.ToLower(comune.Keyurl),
-			}, nil
-		}
-	}
-	return geo{}, fmt.Errorf("city not found on immobiliare.it: %s", name)
-}
-
 type options struct {
-	buildingType string
-	city         string
-	maxPrice     int
-	minPrice     int
-	minSize      int
-	maxSize      int
-	spreadsheet  string // resolved spreadsheet ID
-	tab          string
-	account      string // gcloud account owning the sheet; empty = active account
-	dryRun       bool
-}
-
-func buildSearchParams(opts options, g geo) url.Values {
-	cat := categories[opts.buildingType]
-	idCategoria, pathSegment := cat[0], cat[1]
-	filters := url.Values{}
-	if opts.maxPrice != 0 {
-		filters.Set("prezzoMassimo", strconv.Itoa(opts.maxPrice))
-	}
-	if opts.minPrice != 0 {
-		filters.Set("prezzoMinimo", strconv.Itoa(opts.minPrice))
-	}
-	if opts.minSize != 0 {
-		filters.Set("superficieMinima", strconv.Itoa(opts.minSize))
-	}
-	if opts.maxSize != 0 {
-		filters.Set("superficieMassima", strconv.Itoa(opts.maxSize))
-	}
-	params := url.Values{
-		"fkRegione":   {g.region},
-		"idProvincia": {g.province},
-		"idComune":    {g.comune},
-		"idContratto": {"1"}, // vendita
-		"idCategoria": {idCategoria},
-		"__lang":      {"it"},
-		"paramsCount": {strconv.Itoa(len(filters))},
-		"path":        {fmt.Sprintf("/vendita-%s/%s/", pathSegment, g.keyurl)},
-	}
-	for k, v := range filters {
-		params[k] = v
-	}
-	return params
-}
-
-// normalizeSurface turns immobiliare's "1.234,5 m²" style into "1234.5", or "n/a".
-func normalizeSurface(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "m²", ""))
-	s = strings.ReplaceAll(s, ".", "")
-	s = strings.ReplaceAll(s, ",", ".")
-	if s == "" {
-		return "n/a"
-	}
-	return s
-}
-
-type searchPage struct {
-	Results []struct {
-		RealEstate struct {
-			ID    json.Number `json:"id"`
-			Title string      `json:"title"`
-			Price struct {
-				Value json.Number `json:"value"`
-			} `json:"price"`
-			Properties []struct {
-				Surface  string `json:"surface"`
-				Location struct {
-					Address   string `json:"address"`
-					Macrozone string `json:"macrozone"`
-					City      string `json:"city"`
-				} `json:"location"`
-			} `json:"properties"`
-		} `json:"realEstate"`
-	} `json:"results"`
-	TotalAds int `json:"totalAds"`
+	platform    string
+	city        string
+	f           filters
+	spreadsheet string // resolved spreadsheet ID
+	tab         string
+	account     string // gcloud account owning the sheet; empty = active account
+	dryRun      bool
 }
 
 // row is (url, title, price, surface, location); price is a json.Number or "n/a".
@@ -269,61 +169,6 @@ type row struct {
 	price   any
 	surface string
 	address string
-}
-
-func fetchListings(searchParams url.Values) ([]row, error) {
-	var rows []row
-	seen := 0
-	for page := 1; ; page++ {
-		params := url.Values{}
-		for k, v := range searchParams {
-			params[k] = v
-		}
-		params.Set("pag", strconv.Itoa(page))
-		var data searchPage
-		err := httpJSON(api+"?"+params.Encode(), "", nil, http.MethodGet, &data)
-		if err != nil {
-			var herr *httpError
-			if errors.As(err, &herr) && herr.code == http.StatusNotFound {
-				return rows, nil // past the last page
-			}
-			return nil, err
-		}
-		for _, item := range data.Results {
-			re := item.RealEstate
-			prop := re.Properties[0]
-			loc := prop.Location
-			var price any = "n/a"
-			if re.Price.Value != "" {
-				price = re.Price.Value
-			}
-			var parts []string
-			for _, p := range []string{loc.Address, loc.Macrozone, loc.City} {
-				if p != "" {
-					parts = append(parts, p)
-				}
-			}
-			address := strings.Join(parts, ", ")
-			if address == "" {
-				address = "n/a"
-			}
-			title := re.Title
-			if title == "" {
-				title = "n/a"
-			}
-			rows = append(rows, row{
-				url:     fmt.Sprintf("https://www.immobiliare.it/annunci/%s/", re.ID.String()),
-				title:   title,
-				price:   price,
-				surface: normalizeSurface(prop.Surface),
-				address: address,
-			})
-		}
-		seen += len(data.Results)
-		if len(data.Results) == 0 || seen >= data.TotalAds {
-			return rows, nil
-		}
-	}
 }
 
 // existingURLRows maps each URL in column A (trailing slash stripped) to its
@@ -463,7 +308,7 @@ func appendRows(token, spreadsheetID, sheetName string, rows []row) error {
 }
 
 func run(opts options) error {
-	g, err := resolveCity(opts.city)
+	listings, err := providers[opts.platform].search(opts.city, opts.f)
 	if err != nil {
 		return err
 	}
@@ -472,10 +317,6 @@ func run(opts options) error {
 		return err
 	}
 	known, err := existingRows(token, opts.spreadsheet, opts.tab)
-	if err != nil {
-		return err
-	}
-	listings, err := fetchListings(buildSearchParams(opts, g))
 	if err != nil {
 		return err
 	}
@@ -518,12 +359,13 @@ func syncCmd(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	var opts options
 	var spreadsheet string
-	fs.StringVar(&opts.buildingType, "category", "commercial", "listing category: commercial or residential")
+	fs.StringVar(&opts.platform, "platform", "immobiliare", "listing platform: "+strings.Join(providerNames(), ", "))
+	fs.StringVar(&opts.f.category, "category", "commercial", "listing category: commercial or residential")
 	fs.StringVar(&opts.city, "city", "", "city name (required)")
-	fs.IntVar(&opts.maxPrice, "max-price", 200000, "max price in EUR, 0 disables")
-	fs.IntVar(&opts.minPrice, "min-price", 0, "min price in EUR, 0 disables")
-	fs.IntVar(&opts.minSize, "min-size", 60, "min surface in m2, 0 disables")
-	fs.IntVar(&opts.maxSize, "max-size", 0, "max surface in m2, 0 disables")
+	fs.IntVar(&opts.f.maxPrice, "max-price", 200000, "max price in EUR, 0 disables")
+	fs.IntVar(&opts.f.minPrice, "min-price", 0, "min price in EUR, 0 disables")
+	fs.IntVar(&opts.f.minSize, "min-size", 60, "min surface in m2, 0 disables")
+	fs.IntVar(&opts.f.maxSize, "max-size", 0, "max surface in m2, 0 disables")
 	fs.StringVar(&spreadsheet, "spreadsheet", "", "spreadsheet ID or Google Sheets URL (required)")
 	fs.StringVar(&opts.tab, "tab", defaultTab, "sheet tab name")
 	fs.StringVar(&opts.account, "account", "", "gcloud account owning the sheet (default: active account)")
@@ -534,8 +376,8 @@ func syncCmd(args []string) error {
 	if spreadsheet == "" || opts.city == "" {
 		return errors.New("sync: --spreadsheet and --city are required")
 	}
-	if _, ok := categories[opts.buildingType]; !ok {
-		return fmt.Errorf("invalid --category %q (choose from commercial, residential)", opts.buildingType)
+	if _, ok := providers[opts.platform]; !ok {
+		return fmt.Errorf("unknown --platform %q (available: %s)", opts.platform, strings.Join(providerNames(), ", "))
 	}
 	id, err := parseSpreadsheetID(spreadsheet)
 	if err != nil {

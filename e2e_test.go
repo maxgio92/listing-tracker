@@ -48,16 +48,12 @@ func TestE2EResolveCity(t *testing.T) {
 	}
 }
 
-func TestE2EFetchListingsRealSearch(t *testing.T) {
+func TestE2EProviderSearch(t *testing.T) {
 	city := e2eCity(t)
-	g, err := resolveCity(city)
+	f := filters{category: "commercial", maxPrice: 200000, minSize: 60}
+	rows, err := providers["immobiliare"].search(city, f)
 	if err != nil {
-		t.Fatalf("resolveCity(%q): %v", city, err)
-	}
-	opts := options{buildingType: "commercial", maxPrice: 200000, minSize: 60}
-	rows, err := fetchListings(buildSearchParams(opts, g))
-	if err != nil {
-		t.Fatalf("fetchListings: %v", err)
+		t.Fatalf("search(%q): %v", city, err)
 	}
 	if len(rows) == 0 {
 		t.Fatalf("expected listings for %q, got none", city)
