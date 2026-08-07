@@ -25,7 +25,7 @@ func TestNormalizeSurface(t *testing.T) {
 }
 
 func TestBuildSearchParams(t *testing.T) {
-	g := geo{region: "reg", province: "PR", comune: "1234", keyurl: "sampletown"}
+	g := immobiliareGeo{region: "reg", province: "PR", comune: "1234", keyurl: "sampletown"}
 
 	tests := []struct {
 		name            string
@@ -73,7 +73,7 @@ func TestBuildSearchParams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params := buildSearchParams(tt.f, g)
+			params := immobiliareSearchParams(tt.f, g)
 			if got := params.Get("paramsCount"); got != tt.wantParamsCount {
 				t.Errorf("paramsCount = %q, want %q", got, tt.wantParamsCount)
 			}

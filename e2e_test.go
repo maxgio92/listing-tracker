@@ -39,12 +39,12 @@ func e2eSpreadsheet(t *testing.T) string {
 
 func TestE2EResolveCity(t *testing.T) {
 	city := e2eCity(t)
-	g, err := resolveCity(city)
+	g, err := immobiliareResolveCity(city)
 	if err != nil {
-		t.Fatalf("resolveCity(%q): %v", city, err)
+		t.Fatalf("immobiliareResolveCity(%q): %v", city, err)
 	}
 	if g.region == "" || g.province == "" || g.comune == "" || g.keyurl == "" {
-		t.Errorf("resolveCity(%q) returned empty fields: %+v", city, g)
+		t.Errorf("immobiliareResolveCity(%q) returned empty fields: %+v", city, g)
 	}
 }
 

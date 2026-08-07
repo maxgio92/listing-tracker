@@ -308,15 +308,17 @@ func appendRows(token, spreadsheetID, sheetName string, rows []row) error {
 }
 
 func run(opts options) error {
-	listings, err := providers[opts.platform].search(opts.city, opts.f)
-	if err != nil {
-		return err
-	}
+	// Auth and sheet access first: a stale gcloud login must fail fast, not
+	// after crawling every search page.
 	token, err := gcloudToken(opts.account)
 	if err != nil {
 		return err
 	}
 	known, err := existingRows(token, opts.spreadsheet, opts.tab)
+	if err != nil {
+		return err
+	}
+	listings, err := providers[opts.platform].search(opts.city, opts.f)
 	if err != nil {
 		return err
 	}

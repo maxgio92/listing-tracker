@@ -1,4 +1,3 @@
-// immobiliare.it listing provider.
 package main
 
 import (
@@ -12,61 +11,62 @@ import (
 )
 
 const (
-	api          = "https://www.immobiliare.it/api-next/search-list/listings/"
-	autocomplete = "https://www.immobiliare.it/api-next/geography/autocomplete/"
+	immobiliareAPI          = "https://www.immobiliare.it/api-next/search-list/listings/"
+	immobiliareAutocomplete = "https://www.immobiliare.it/api-next/geography/autocomplete/"
 )
 
 // idCategoria and URL path segment per building type.
-var categories = map[string][2]string{
+var immobiliareCategories = map[string][2]string{
 	"commercial":  {"26", "negozi"}, // API category 26, URL segment "negozi" (shops)
 	"residential": {"1", "case"},    // API category 1, URL segment "case" (homes)
 }
 
+// immobiliareProvider is the immobiliare.it listing provider.
 type immobiliareProvider struct{}
 
 func (immobiliareProvider) search(city string, f filters) ([]row, error) {
-	if _, ok := categories[f.category]; !ok {
+	if _, ok := immobiliareCategories[f.category]; !ok {
 		return nil, fmt.Errorf("invalid --category %q (choose from commercial, residential)", f.category)
 	}
-	g, err := resolveCity(city)
+	g, err := immobiliareResolveCity(city)
 	if err != nil {
 		return nil, err
 	}
-	return fetchListings(buildSearchParams(f, g))
+	return immobiliareFetchListings(immobiliareSearchParams(f, g))
 }
 
-type geoParent struct {
+type immobiliareGeoParent struct {
 	Type   int    `json:"type"`
 	ID     string `json:"id"`
 	Label  string `json:"label"`
 	Keyurl string `json:"keyurl"`
 }
 
-type geoEntry struct {
-	Parents []geoParent `json:"parents"`
+type immobiliareGeoEntry struct {
+	Parents []immobiliareGeoParent `json:"parents"`
 }
 
-// geo identifies a comune on immobiliare.it.
-type geo struct {
+// immobiliareGeo identifies a comune on immobiliare.it.
+type immobiliareGeo struct {
 	region   string
 	province string
 	comune   string
 	keyurl   string
 }
 
-func resolveCity(name string) (geo, error) {
+func immobiliareResolveCity(name string) (immobiliareGeo, error) {
 	q := url.Values{
 		"macrozones": {"1"},
 		"min_level":  {"9"},
 		"query":      {name},
 		"__lang":     {"it"},
 	}
-	var entries []geoEntry
-	if err := httpJSON(autocomplete+"?"+q.Encode(), "", nil, http.MethodGet, &entries); err != nil {
-		return geo{}, err
+	var entries []immobiliareGeoEntry
+	if err := httpJSON(immobiliareAutocomplete+"?"+q.Encode(), "", nil, http.MethodGet, &entries); err != nil {
+		return immobiliareGeo{}, err
 	}
 	for _, entry := range entries {
-		parents := map[int]geoParent{}
+		parents := map[int]immobiliareGeoParent{}
 		for _, p := range entry.Parents {
 			parents[p.Type] = p
 		}
@@ -74,7 +74,7 @@ func resolveCity(name string) (geo, error) {
 		_, ok1 := parents[1]
 		_, ok0 := parents[0]
 		if ok2 && ok1 && ok0 && strings.EqualFold(comune.Label, name) {
-			return geo{
+			return immobiliareGeo{
 				region:   parents[0].ID,
 				province: parents[1].ID,
 				comune:   comune.ID,
@@ -82,11 +82,11 @@ func resolveCity(name string) (geo, error) {
 			}, nil
 		}
 	}
-	return geo{}, fmt.Errorf("city not found on immobiliare.it: %s", name)
+	return immobiliareGeo{}, fmt.Errorf("city not found on immobiliare.it: %s", name)
 }
 
-func buildSearchParams(f filters, g geo) url.Values {
-	cat := categories[f.category]
+func immobiliareSearchParams(f filters, g immobiliareGeo) url.Values {
+	cat := immobiliareCategories[f.category]
 	idCategoria, pathSegment := cat[0], cat[1]
 	fv := url.Values{}
 	if f.maxPrice != 0 {
@@ -128,7 +128,7 @@ func normalizeSurface(s string) string {
 	return s
 }
 
-type searchPage struct {
+type immobiliareSearchPage struct {
 	Results []struct {
 		RealEstate struct {
 			ID    json.Number `json:"id"`
@@ -149,7 +149,7 @@ type searchPage struct {
 	TotalAds int `json:"totalAds"`
 }
 
-func fetchListings(searchParams url.Values) ([]row, error) {
+func immobiliareFetchListings(searchParams url.Values) ([]row, error) {
 	var rows []row
 	seen := 0
 	for page := 1; ; page++ {
@@ -158,8 +158,8 @@ func fetchListings(searchParams url.Values) ([]row, error) {
 			params[k] = v
 		}
 		params.Set("pag", strconv.Itoa(page))
-		var data searchPage
-		err := httpJSON(api+"?"+params.Encode(), "", nil, http.MethodGet, &data)
+		var data immobiliareSearchPage
+		err := httpJSON(immobiliareAPI+"?"+params.Encode(), "", nil, http.MethodGet, &data)
 		if err != nil {
 			var herr *httpError
 			if errors.As(err, &herr) && herr.code == http.StatusNotFound {
@@ -169,6 +169,9 @@ func fetchListings(searchParams url.Values) ([]row, error) {
 		}
 		for _, item := range data.Results {
 			re := item.RealEstate
+			if len(re.Properties) == 0 {
+				continue // a malformed listing must not kill the whole run
+			}
 			prop := re.Properties[0]
 			loc := prop.Location
 			var price any = "n/a"
