@@ -158,6 +158,7 @@ type options struct {
 	f           filters
 	spreadsheet string // resolved spreadsheet ID
 	tab         string
+	ignoreTab   string // tab whose column A lists URLs to skip; missing tab = empty
 	account     string // gcloud account owning the sheet; empty = active account
 	dryRun      bool
 }
@@ -191,6 +192,25 @@ func existingURLRows(token, spreadsheetID, sheetName string) (map[string]int, er
 		}
 	}
 	return byURL, nil
+}
+
+// ignoredURLs returns the URLs listed in the ignore tab (column A, trailing
+// slash stripped). A missing tab is not an error: it reads as an empty set,
+// so the feature is opt-in by creating the tab.
+func ignoredURLs(token, spreadsheetID, sheetName string) (map[string]bool, error) {
+	byURL, err := existingURLRows(token, spreadsheetID, sheetName)
+	if err != nil {
+		var herr *httpError
+		if errors.As(err, &herr) && herr.code == http.StatusBadRequest {
+			return map[string]bool{}, nil // tab does not exist
+		}
+		return nil, err
+	}
+	ignored := make(map[string]bool, len(byURL))
+	for u := range byURL {
+		ignored[u] = true
+	}
+	return ignored, nil
 }
 
 // existingRows reads columns A2:E and maps each URL (trailing slash stripped)
@@ -318,6 +338,10 @@ func run(opts options) error {
 	if err != nil {
 		return err
 	}
+	ignored, err := ignoredURLs(token, opts.spreadsheet, opts.ignoreTab)
+	if err != nil {
+		return err
+	}
 	listings, err := providers[opts.platform].search(opts.city, opts.f)
 	if err != nil {
 		return err
@@ -325,7 +349,11 @@ func run(opts options) error {
 	var newRows []row
 	var updates []update
 	for _, r := range listings {
-		sr, ok := known[strings.TrimRight(r.url, "/")]
+		key := strings.TrimRight(r.url, "/")
+		if ignored[key] {
+			continue
+		}
+		sr, ok := known[key]
 		if !ok {
 			newRows = append(newRows, r)
 			fmt.Printf("new: %s | %v EUR | %s m2 | %s\n", r.title, r.price, r.surface, r.url)
@@ -370,6 +398,7 @@ func syncCmd(args []string) error {
 	fs.IntVar(&opts.f.maxSize, "max-size", 0, "max surface in m2, 0 disables")
 	fs.StringVar(&spreadsheet, "spreadsheet", "", "spreadsheet ID or Google Sheets URL (required)")
 	fs.StringVar(&opts.tab, "tab", defaultTab, "sheet tab name")
+	fs.StringVar(&opts.ignoreTab, "ignore-tab", "Ignored", "tab whose column A lists URLs to skip")
 	fs.StringVar(&opts.account, "account", "", "gcloud account owning the sheet (default: active account)")
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "print actions without touching the sheet")
 	if err := fs.Parse(args); err != nil {

@@ -33,6 +33,9 @@ One subcommand:
 
 `--spreadsheet` accepts a bare ID or a full docs.google.com URL. `--account`
 selects the gcloud account when the sheet owner is not the active login.
+`--ignore-tab` (default "Ignored") names a tab whose column A lists URLs that
+sync must never add or update; move a row's URL there to reject a listing
+permanently. A missing tab means nothing is ignored.
 Column F of the sheet gets a price-per-m2 formula on every append and update.
 
 Cron example (daily at 9:00):
