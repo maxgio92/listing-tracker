@@ -80,3 +80,19 @@ notice; the sync runs will start failing in the log if that happens.
 [RENOVATION.md](RENOVATION.md) is a companion guide for estimating the full
 cost of a listing (purchase, agency, works) when the goal is converting a
 commercial property into an apartment in Italy.
+
+## enrich.py: curated tabs
+
+`sync` maintains flat raw tabs (one row per listing, columns A-F). `enrich.py`
+decorates a curated tab in place, keeping its listing set and adding detail
+columns (condition, rooms, bathrooms, floor, sea/centre distance, a best-effort
+construction note, and zona), formatted and optionally sorted by price/m2:
+
+```sh
+python3 enrich.py --spreadsheet <ID|URL> --tab Commerciali \
+    --city Fano --category commercial --account you@example.com --sort
+```
+
+Detail comes from the search API matched by listing id; delisted listings keep
+whatever the tab already held and get "n/d" for the rest. Distances are
+straight-line to the city centre (override with --centre "lat,lon").
