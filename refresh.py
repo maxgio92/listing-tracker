@@ -520,13 +520,17 @@ def main():
                     d["bath"], d["floor"], d["sea"], d["centre"], d["year"],
                     d["address"], d["zona"], tier, d["esterni"], d["park"], d["arred"], d["dot"],
                     d["fraz"], level, works, total, totm2, vs, yld, payback, var, primo, novita]
-            cond = d["cond"]
+            mlevel = level
         else:
             base = ([u, man.get("_title", "n/a")] + ["n/d"] * 24 + ["", primo, novita])
-            cond = ""
+            mlevel = ""
+        # prefill Lavori with the specific maintenance level (ordinaria vs
+        # straordinaria), not a generic word; nessuna/renovated leaves it blank
         lavori = man.get("Lavori", "")
-        if not lavori and "ristruttur" in cond.lower():
-            lavori = "ristrutturazione"
+        if lavori == "ristrutturazione":  # legacy generic auto value, replace
+            lavori = ""
+        if not lavori and mlevel.rstrip("?") in ("ordinaria", "straordinaria"):
+            lavori = mlevel.rstrip("?")
         # bare ownership: auto from the listing text or from a manual note
         proprieta = man.get("Proprietà", "")
         if not proprieta and ((d and d.get("proprieta") == "nuda")
