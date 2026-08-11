@@ -132,18 +132,24 @@ needing straordinaria work. Edit the parameters in the Ristrutturazione tab
 and re-run to recompute. Use `--sort-by total-m2` to rank by all-in
 cost per m2 instead of sticker price (`--sort-by price-m2`, or `--sort`).
 
-### review.py: review shortlist
+### review.py: review buckets
 
-`review.py` builds a review tab from an enriched tab: it drops the hard
-exclusions (nuda proprietà, auctions), keeps everything else including
-heavy-work listings, and sorts by all-in cost per m2. Heavy work is fine when
-the cost per m2 is low, so straordinaria rows are kept and flagged (orange
-Manutenzione cell), and outdoor space is marked as a plus (green Esterni
-cell). The daily cron runs it after the residential refresh.
+`review.py` splits the enriched source tab into maintenance buckets, after
+subtracting listings already chosen (--preferiti) or rejected (--ignore-tab)
+and dropping nuda proprietà and auctions:
+
+- `<prefix>-pronti` (Manutenzione = nessuna)
+- `<prefix>-ordinaria` (light works)
+- `<prefix>-straordinaria` (heavy works)
+
+Costs differ by bucket, so each tab is sorted by all-in cost per m2 and the
+good-deal mark (green Costo tot./m2) is the cheapest quartile within that
+bucket. Outdoor space is tinted green. The daily cron runs it after the
+residential refresh.
 
 ```sh
 python3 review.py --spreadsheet <ID> --source Appartamenti-ricerca \
-    --dest Appartamenti-da-valutare --account you@example.com
+    --prefix Appartamenti --account you@example.com
 ```
 
 ### Frazionabile (subdivision potential)

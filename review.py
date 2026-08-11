@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
-"""Build a review shortlist tab from an enriched listing tab.
+"""Split an enriched listing tab into maintenance buckets for review.
 
-Reads an already-enriched source tab (as produced by refresh.py), drops the
-hard exclusions (bare ownership and auctions), keeps everything else including
-heavy-work listings, and writes them to a destination tab sorted by all-in cost
-per m2 (Costo tot./m2). Heavy work is acceptable when the cost per m2 is low, so
-straordinaria listings are kept and only flagged, not removed.
+From an enriched source tab (produced by refresh.py), subtract listings already
+chosen (--preferiti) or rejected (--ignore-tab), drop the hard exclusions (bare
+ownership, auctions), then split the rest by maintenance level into three tabs:
 
-Cues on the destination tab:
-  - sorted cheapest all-in first (Costo tot./m2)
-  - Manutenzione cell tinted orange where the listing needs straordinaria work
-  - Esterni cell tinted green where the listing has outdoor space (a plus)
+  <prefix>-pronti          ready to use (Manutenzione = nessuna)
+  <prefix>-ordinaria       light works
+  <prefix>-straordinaria   heavy works
+
+Costs differ by bucket (ready = price + agency; works add on top), so each tab
+is sorted by all-in cost per m2 and the good-deal mark (green Costo tot./m2) is
+the cheapest quartile within that bucket. Outdoor space stays tinted green.
 
 Usage:
     python3 review.py --spreadsheet <ID|URL> --source Appartamenti-ricerca \
-        --dest Appartamenti-da-valutare --account you@example.com
+        --prefix Appartamenti --account you@example.com
 """
 
 import argparse
 import json
+import statistics
 import subprocess
 import urllib.request
 
 PM2_FORMULA = '=INDIRECT("C"&ROW())/INDIRECT("D"&ROW())'
+BUCKETS = ("pronti", "ordinaria", "straordinaria")
 
 
 def token(account):
@@ -50,24 +53,103 @@ def parse_spreadsheet_id(s):
     return s
 
 
-def ensure_tab(tok, sid, title):
-    for s in sheets(tok, sid, "?fields=sheets.properties")["sheets"]:
-        if s["properties"]["title"] == title:
-            return s["properties"]["sheetId"]
+def tab_ids(tok, sid):
+    return {s["properties"]["title"]: s["properties"]["sheetId"]
+            for s in sheets(tok, sid, "?fields=sheets.properties")["sheets"]}
+
+
+def ensure_tab(tok, sid, title, ids):
+    if title in ids:
+        return ids[title]
     rep = sheets(tok, sid, ":batchUpdate",
                  {"requests": [{"addSheet": {"properties": {"title": title}}}]}, "POST")
     return rep["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+
+def bucket_of(man):
+    m = str(man).strip().lower()
+    if m == "nessuna":
+        return "pronti"
+    if m.startswith("straordinaria"):
+        return "straordinaria"
+    return "ordinaria"  # ordinaria, ordinaria?, unknown -> light-works bucket
+
+
+def write_bucket(tok, sid, tab, ids, H, rows, idx, PM2, EST, TM):
+    sh = ensure_tab(tok, sid, tab, ids)
+    sheets(tok, sid, f"/values/{tab}!A1:AZ4000:clear", {}, "POST")
+    sheets(tok, sid, f"/values/{tab}!A1?valueInputOption=USER_ENTERED",
+           {"values": [H] + rows}, "PUT")
+    n, NC = len(rows) + 1, len(H)
+
+    def c(r, g, b):
+        return {"red": r / 255, "green": g / 255, "blue": b / 255}
+    euro = [idx["Prezzo (EUR)"], idx["Costo lavori (EUR)"], idx["Costo totale (EUR)"],
+            idx["Costo tot./m2"], PM2]
+    meta = sheets(tok, sid, "?fields=sheets(properties(sheetId),bandedRanges(bandedRangeId))")
+    bands = [b["bandedRangeId"] for s in meta["sheets"]
+             if s["properties"]["sheetId"] == sh for b in s.get("bandedRanges", [])]
+    reqs = [{"deleteBanding": {"bandedRangeId": b}} for b in bands]
+    reqs += [
+        {"updateSheetProperties": {"properties": {"sheetId": sh,
+            "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
+        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": n,
+            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
+            {"horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}},
+            "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)"}},
+        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": 1,
+            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
+            {"backgroundColor": c(31, 41, 55), "textFormat": {"bold": True,
+             "foregroundColor": c(255, 255, 255)}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+    ]
+    if n > 1:
+        reqs.append({"addBanding": {"bandedRange": {"range": {"sheetId": sh,
+            "startRowIndex": 1, "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": NC},
+            "rowProperties": {"firstBandColor": c(255, 255, 255),
+             "secondBandColor": c(238, 242, 247)}}}})
+    reqs.append({"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
+        "startColumnIndex": 0, "endColumnIndex": NC}}}})
+    for ci in euro:
+        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
+            "startColumnIndex": ci, "endColumnIndex": ci + 1}, "cell": {"userEnteredFormat":
+            {"numberFormat": {"type": "CURRENCY", "pattern": "€ #,##0"}}},
+            "fields": "userEnteredFormat.numberFormat"}})
+
+    def totm2(r):
+        try:
+            return float(r[TM])
+        except (ValueError, TypeError):
+            return float("inf")
+    tm_vals = sorted(v for v in (totm2(r) for r in rows) if v != float("inf"))
+    cutoff = tm_vals[int(0.25 * len(tm_vals))] if tm_vals else 0
+    deals = 0
+    for i, r in enumerate(rows, 2):
+        if str(r[EST]).strip().lower() not in ("", "no"):
+            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
+                "endRowIndex": i, "startColumnIndex": EST, "endColumnIndex": EST + 1},
+                "cell": {"userEnteredFormat": {"backgroundColor": c(212, 237, 218)}},
+                "fields": "userEnteredFormat.backgroundColor"}})
+        if totm2(r) <= cutoff:
+            deals += 1
+            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
+                "endRowIndex": i, "startColumnIndex": TM, "endColumnIndex": TM + 1},
+                "cell": {"userEnteredFormat": {"backgroundColor": c(76, 175, 80),
+                    "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+    sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")
+    return len(rows), deals
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--spreadsheet", required=True)
     ap.add_argument("--source", default="Appartamenti-ricerca")
-    ap.add_argument("--dest", default="Appartamenti-da-valutare")
-    ap.add_argument("--preferiti", default="Appartamenti-preferiti",
-                    help="tab whose listings are already chosen (subtracted)")
-    ap.add_argument("--ignore-tab", default="Ignorati",
-                    help="tab whose listings are rejected (subtracted)")
+    ap.add_argument("--prefix", default="Appartamenti")
+    ap.add_argument("--preferiti", default="Appartamenti-preferiti")
+    ap.add_argument("--ignore-tab", default="Ignorati")
+    ap.add_argument("--retire", default="Appartamenti-da-valutare",
+                    help="old combined tab to delete once split (blank to keep)")
     ap.add_argument("--account", default="")
     args = ap.parse_args()
 
@@ -95,10 +177,11 @@ def main():
     def val(r, i):
         return r[i] if i < len(r) else ""
 
-    kept, dropped = [], {"nuda": 0, "auction": 0, "preferiti/ignorati": 0}
+    parts = {b: [] for b in BUCKETS}
+    dropped = {"nuda": 0, "auction": 0, "preferiti/ignorati": 0}
     for r in v[1:]:
         r = list(r) + [""] * (len(H) - len(r))
-        if str(r[0]).rstrip("/") in subtract:  # already chosen or rejected
+        if str(r[0]).rstrip("/") in subtract:
             dropped["preferiti/ignorati"] += 1
             continue
         if str(val(r, PROP)).strip().lower() == "nuda":
@@ -108,100 +191,27 @@ def main():
             dropped["auction"] += 1
             continue
         r[PM2] = PM2_FORMULA
-        kept.append(r)
+        parts[bucket_of(val(r, MAN))].append(r)
 
     def totm2(r):
         try:
             return float(r[TM])
         except (ValueError, TypeError):
-            return float("inf")  # unknown cost sorts last
-    kept.sort(key=totm2)
+            return float("inf")
 
-    # ready to use: no maintenance and price under the budget cap
-    price_i = idx["Prezzo (EUR)"]
-    ready_cap = 250000
-    H = H + ["Pronto (<250k, no lavori)"]
-    PRONTO = len(H) - 1
-    ready = 0
-    for r in kept:
-        try:
-            ok = str(val(r, MAN)).strip().lower() == "nessuna" and float(r[price_i]) < ready_cap
-        except (ValueError, TypeError):
-            ok = False
-        r.append("sì" if ok else "")
-        ready += ok
+    ids = tab_ids(tok, sid)
+    summary = []
+    for b in BUCKETS:
+        rows = sorted(parts[b], key=totm2)
+        kept, deals = write_bucket(tok, sid, f"{args.prefix}-{b}", ids, H, rows, idx, PM2, EST, TM)
+        summary.append(f"{b}={kept} ({deals} deals)")
 
-    sh = ensure_tab(tok, sid, args.dest)
-    sheets(tok, sid, f"/values/{args.dest}!A1:AZ4000:clear", {}, "POST")
-    sheets(tok, sid, f"/values/{args.dest}!A1?valueInputOption=USER_ENTERED",
-           {"values": [H] + kept}, "PUT")
-
-    n, NC = len(kept) + 1, len(H)
-
-    def c(r, g, b):
-        return {"red": r / 255, "green": g / 255, "blue": b / 255}
-    euro = [idx["Prezzo (EUR)"], idx["Costo lavori (EUR)"], idx["Costo totale (EUR)"],
-            idx["Costo tot./m2"], PM2]
-    meta = sheets(tok, sid, "?fields=sheets(properties(sheetId),bandedRanges(bandedRangeId))")
-    bands = [b["bandedRangeId"] for s in meta["sheets"]
-             if s["properties"]["sheetId"] == sh for b in s.get("bandedRanges", [])]
-    reqs = [{"deleteBanding": {"bandedRangeId": b}} for b in bands]
-    reqs += [
-        {"updateSheetProperties": {"properties": {"sheetId": sh,
-            "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": n,
-            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
-            {"horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}},
-            "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": 1,
-            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
-            {"backgroundColor": c(31, 41, 55), "textFormat": {"bold": True,
-             "foregroundColor": c(255, 255, 255)}}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
-        {"addBanding": {"bandedRange": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": NC},
-            "rowProperties": {"firstBandColor": c(255, 255, 255),
-             "secondBandColor": c(238, 242, 247)}}}},
-        {"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
-            "startColumnIndex": 0, "endColumnIndex": NC}}}},
-    ]
-    for ci in euro:
-        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "startColumnIndex": ci, "endColumnIndex": ci + 1}, "cell": {"userEnteredFormat":
-            {"numberFormat": {"type": "CURRENCY", "pattern": "€ #,##0"}}},
-            "fields": "userEnteredFormat.numberFormat"}})
-    # good deal = all-in cost per m2 in the cheapest quartile of the shortlist
-    tm_vals = sorted(v for v in (totm2(r) for r in kept) if v != float("inf"))
-    cutoff = tm_vals[int(0.25 * len(tm_vals))] if tm_vals else 0
-    deals = 0
-    for i, r in enumerate(kept, 2):
-        if totm2(r) <= cutoff:
-            deals += 1
-            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
-                "endRowIndex": i, "startColumnIndex": TM, "endColumnIndex": TM + 1},
-                "cell": {"userEnteredFormat": {"backgroundColor": c(76, 175, 80),
-                    "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
-                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
-    for i, r in enumerate(kept, 2):
-        if str(val(r, EST)).strip().lower() not in ("", "no"):
-            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
-                "endRowIndex": i, "startColumnIndex": EST, "endColumnIndex": EST + 1},
-                "cell": {"userEnteredFormat": {"backgroundColor": c(212, 237, 218)}},
-                "fields": "userEnteredFormat.backgroundColor"}})
-        if str(val(r, MAN)).strip().lower().startswith("straordinaria"):
-            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
-                "endRowIndex": i, "startColumnIndex": MAN, "endColumnIndex": MAN + 1},
-                "cell": {"userEnteredFormat": {"backgroundColor": c(255, 224, 178)}},
-                "fields": "userEnteredFormat.backgroundColor"}})
-        if r[PRONTO] == "sì":
-            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
-                "endRowIndex": i, "startColumnIndex": PRONTO, "endColumnIndex": PRONTO + 1},
-                "cell": {"userEnteredFormat": {"backgroundColor": c(76, 175, 80),
-                    "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
-                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
-    sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")
-    print(f"{args.dest}: {len(kept)} listings, {deals} good deals (<= €{cutoff:.0f}/m2 all-in), "
-          f"{ready} ready-to-use, dropped {dropped}")
+    if args.retire:
+        ids = tab_ids(tok, sid)
+        if args.retire in ids:
+            sheets(tok, sid, ":batchUpdate",
+                   {"requests": [{"deleteSheet": {"sheetId": ids[args.retire]}}]}, "POST")
+    print(f"{args.source} -> " + ", ".join(summary) + f"; dropped {dropped}")
 
 
 if __name__ == "__main__":
