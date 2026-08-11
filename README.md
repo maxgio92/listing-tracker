@@ -99,3 +99,17 @@ are recomputed every run; manual columns (Proprietà, Lavori, Adatto affitto,
 Stato, Note) are sticky, matched by URL, so human input survives a refresh.
 Distances are straight-line to the city centre (override with --centre
 "lat,lon").
+
+### Search-sourced refresh
+
+`enrich.py --from-search` sources the listing set from a filtered search
+instead of the tab's column A, then enriches and preserves manual columns by
+URL. This drives the daily residential feed (a saved immobiliare search):
+
+```sh
+python3 enrich.py --from-search --spreadsheet <ID> --tab Appartamenti-ricerca \
+    --city Fano --category residential --account you@example.com \
+    --max-price 310000 --min-size 70 --min-rooms 3 \
+    --mzona 10775,10776,... --quartiere 14240,... \
+    --exclude-zona "Centro Storico" --sort
+```

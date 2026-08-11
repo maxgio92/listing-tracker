@@ -205,6 +205,41 @@ def fetch_details(city, category, centre):
     return det
 
 
+def research_urls(city, category, mx, mn_size, mn_rooms, mzona, quartiere, exclude_zona):
+    """Return listing URLs from a filtered saved search, in result order,
+    dropping any whose microzone is in exclude_zona (case-insensitive)."""
+    idc, seg = CATEGORIES[category]
+    region, prov, comune, keyurl = resolve_city(city)
+    flt = []
+    if mx:
+        flt.append(("prezzoMassimo", str(mx)))
+    if mn_size:
+        flt.append(("superficieMinima", str(mn_size)))
+    if mn_rooms:
+        flt.append(("localiMinimo", str(mn_rooms)))
+    flt += [(f"idMZona[{i}]", z) for i, z in enumerate(mzona)]
+    flt += [(f"idQuartiere[{i}]", z) for i, z in enumerate(quartiere)]
+    base = [("fkRegione", region), ("idProvincia", prov), ("idComune", comune),
+            ("idContratto", "1"), ("idCategoria", idc), ("__lang", "it"),
+            ("paramsCount", str(1 + len(flt))), ("path", f"/vendita-{seg}/{keyurl}/")] + flt
+    excl = {z.strip().lower() for z in exclude_zona if z.strip()}
+    urls, seen, page = [], 0, 1
+    while True:
+        d = api_json(f"{API}?{urllib.parse.urlencode(base + [('pag', str(page))])}")
+        res = d.get("results", [])
+        for it in res:
+            re_ = it["realEstate"]
+            props = re_.get("properties") or []
+            mz = ((props[0].get("location") or {}).get("microzone") or "") if props else ""
+            if mz.strip().lower() in excl:
+                continue
+            urls.append(f"https://www.immobiliare.it/annunci/{re_['id']}/")
+        seen += len(res)
+        if not res or seen >= (d.get("totalAds") or 0):
+            return urls
+        page += 1
+
+
 def listing_id(url):
     return str(url).rstrip("/").rsplit("/", 1)[-1]
 
@@ -238,6 +273,15 @@ def main():
     ap.add_argument("--account", default="")
     ap.add_argument("--centre", default="")
     ap.add_argument("--sort", action="store_true", help="sort by price per m2")
+    ap.add_argument("--from-search", action="store_true",
+                    help="source listings from a filtered search, not the tab")
+    ap.add_argument("--max-price", type=int, default=0)
+    ap.add_argument("--min-size", type=int, default=0)
+    ap.add_argument("--min-rooms", type=int, default=0)
+    ap.add_argument("--mzona", default="", help="comma-separated idMZona values")
+    ap.add_argument("--quartiere", default="", help="comma-separated idQuartiere values")
+    ap.add_argument("--exclude-zona", default="",
+                    help="comma-separated microzone names to drop")
     args = ap.parse_args()
 
     centre = DEFAULT_CENTRE
@@ -247,7 +291,15 @@ def main():
     tok = token(args.account)
     sh = sheet_id(tok, sid, args.tab)
 
-    urls, manual = read_existing(tok, sid, args.tab)
+    tab_urls, manual = read_existing(tok, sid, args.tab)
+    if args.from_search:
+        urls = research_urls(
+            args.city, args.category, args.max_price, args.min_size, args.min_rooms,
+            [z for z in args.mzona.split(",") if z],
+            [z for z in args.quartiere.split(",") if z],
+            args.exclude_zona.split(","))
+    else:
+        urls = tab_urls
     det = fetch_details(args.city, args.category, centre)
 
     out, enriched, auction = [HEADER], 0, []
