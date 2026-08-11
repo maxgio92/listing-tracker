@@ -18,7 +18,7 @@ Layout (A..W):
 so and the cell is empty; any manual edit then sticks.
 
 Usage:
-    python3 enrich.py --spreadsheet <ID|URL> --tab Appartamenti \
+    python3 refresh.py --spreadsheet <ID|URL> --tab Appartamenti \
         --city Fano --category residential --account you@example.com [--sort]
 """
 
@@ -32,7 +32,7 @@ import urllib.request
 
 API = "https://www.immobiliare.it/api-next/search-list/listings/"
 AUTOCOMPLETE = "https://www.immobiliare.it/api-next/geography/autocomplete/"
-UA = "Mozilla/5.0 (X11; Linux x86_64) listing-tracker-enrich/1.0"
+UA = "Mozilla/5.0 (X11; Linux x86_64) listing-tracker-refresh/1.0"
 CATEGORIES = {"commercial": ("26", "negozi"), "residential": ("1", "case")}
 DEFAULT_CENTRE = (43.8436, 13.0170)  # Piazza XX Settembre, Fano
 

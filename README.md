@@ -81,15 +81,15 @@ notice; the sync runs will start failing in the log if that happens.
 cost of a listing (purchase, agency, works) when the goal is converting a
 commercial property into an apartment in Italy.
 
-## enrich.py: curated tabs
+## refresh.py: curated tabs
 
-`sync` maintains flat raw tabs (one row per listing, columns A-F). `enrich.py`
+`sync` maintains flat raw tabs (one row per listing, columns A-F). `refresh.py`
 decorates a curated tab in place, keeping its listing set and adding detail
 columns (condition, rooms, bathrooms, floor, sea/centre distance, a best-effort
 construction note, and zona), formatted and optionally sorted by price/m2:
 
 ```sh
-python3 enrich.py --spreadsheet <ID|URL> --tab Commerciali \
+python3 refresh.py --spreadsheet <ID|URL> --tab Commerciali \
     --city Fano --category commercial --account you@example.com --sort
 ```
 
@@ -102,12 +102,12 @@ Distances are straight-line to the city centre (override with --centre
 
 ### Search-sourced refresh
 
-`enrich.py --from-search` sources the listing set from a filtered search
+`refresh.py --from-search` sources the listing set from a filtered search
 instead of the tab's column A, then enriches and preserves manual columns by
 URL. This drives the daily residential feed (a saved immobiliare search):
 
 ```sh
-python3 enrich.py --from-search --spreadsheet <ID> --tab Appartamenti-ricerca \
+python3 refresh.py --from-search --spreadsheet <ID> --tab Appartamenti-ricerca \
     --city Fano --category residential --account you@example.com \
     --max-price 310000 --min-size 70 --min-rooms 3 \
     --mzona 10775,10776,... --quartiere 14240,... \
