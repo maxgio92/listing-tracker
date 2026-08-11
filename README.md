@@ -100,6 +100,10 @@ Stato, Note) are sticky, matched by URL, so human input survives a refresh.
 Distances are straight-line to the city centre (override with --centre
 "lat,lon").
 
+Bare-ownership listings (nuda proprietà, detected from the listing text or a
+manual Note) get Proprietà = "nuda" and a red row, since the property cannot
+be used until the occupant leaves. Auction rows are amber; the red wins.
+
 ### Search-sourced refresh
 
 `refresh.py --from-search` sources the listing set from a filtered search
