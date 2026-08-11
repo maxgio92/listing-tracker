@@ -158,3 +158,8 @@ review.py also marks value on the shortlist: the Costo tot./m2 cell is green
 for good deals (all-in cost per m2 in the cheapest quartile), and a "Pronto
 (<250k, no lavori)" column flags ready-to-use listings (no maintenance and
 price under 250k).
+
+review.py subtracts listings already chosen (--preferiti, default
+Appartamenti-preferiti) or rejected (--ignore-tab, default Ignorati), so the
+review tab is ricerca minus preferiti minus to-exclude, minus the nuda/auction
+hard exclusions.

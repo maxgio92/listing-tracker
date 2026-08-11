@@ -64,11 +64,24 @@ def main():
     ap.add_argument("--spreadsheet", required=True)
     ap.add_argument("--source", default="Appartamenti-ricerca")
     ap.add_argument("--dest", default="Appartamenti-da-valutare")
+    ap.add_argument("--preferiti", default="Appartamenti-preferiti",
+                    help="tab whose listings are already chosen (subtracted)")
+    ap.add_argument("--ignore-tab", default="Ignorati",
+                    help="tab whose listings are rejected (subtracted)")
     ap.add_argument("--account", default="")
     args = ap.parse_args()
 
     sid = parse_spreadsheet_id(args.spreadsheet)
     tok = token(args.account)
+
+    def urls_in(tab):
+        try:
+            rows = sheets(tok, sid, f"/values/{tab}!A2:A4000").get("values", [])
+        except urllib.error.HTTPError:
+            return set()
+        return {r[0].rstrip("/") for r in rows if r and "immobiliare.it/annunci" in str(r[0])}
+
+    subtract = urls_in(args.preferiti) | urls_in(args.ignore_tab)
 
     v = sheets(tok, sid, f"/values/{args.source}!A1:AA2000"
                "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
@@ -82,9 +95,12 @@ def main():
     def val(r, i):
         return r[i] if i < len(r) else ""
 
-    kept, dropped = [], {"nuda": 0, "auction": 0}
+    kept, dropped = [], {"nuda": 0, "auction": 0, "preferiti/ignorati": 0}
     for r in v[1:]:
         r = list(r) + [""] * (len(H) - len(r))
+        if str(r[0]).rstrip("/") in subtract:  # already chosen or rejected
+            dropped["preferiti/ignorati"] += 1
+            continue
         if str(val(r, PROP)).strip().lower() == "nuda":
             dropped["nuda"] += 1
             continue
