@@ -183,7 +183,10 @@ def fetch_details(city, category, centre):
                                          loc.get("city")) if x)
             floor = pr.get("floor")
             est, park, arred, dot = amenities(pr)
+            txt = " ".join(str(x or "") for x in (re_.get("title"), pr.get("caption"),
+                                                  pr.get("description"))).lower()
             det[str(re_["id"])] = {
+                "proprieta": "nuda" if "nuda pro" in txt else "",
                 "title": re_.get("title") or "n/a",
                 "price": price if price is not None else "n/a",
                 "surface": surf or "n/a",
@@ -302,7 +305,8 @@ def main():
         urls = tab_urls
     det = fetch_details(args.city, args.category, centre)
 
-    out, enriched, auction = [HEADER], 0, []
+    prop_i = HEADER.index("Proprietà")
+    out, enriched = [HEADER], 0
     for u in urls:
         d = det.get(listing_id(u))
         man = manual.get(u, {})
@@ -318,23 +322,26 @@ def main():
         lavori = man.get("Lavori", "")
         if not lavori and "ristruttur" in cond.lower():
             lavori = "ristrutturazione"
-        manvals = [man.get("Proprietà", ""), lavori, man.get("Adatto affitto", ""),
+        # bare ownership: auto from the listing text or from a manual note
+        proprieta = man.get("Proprietà", "")
+        if not proprieta and ((d and d.get("proprieta") == "nuda")
+                              or "nuda pro" in man.get("Note", "").lower()):
+            proprieta = "nuda"
+        manvals = [proprieta, lavori, man.get("Adatto affitto", ""),
                    man.get("Stato", ""), man.get("Note", "")]
-        row = base + manvals + [PM2_FORMULA]
-        if "asta" in str(base[1]).lower():
-            auction.append(len(out) + 1)
-        out.append(row)
+        out.append(base + manvals + [PM2_FORMULA])
 
     if args.sort:
-        body = out[1:]
         def pm2(row):
             try:
                 return float(row[2]) / float(row[3])
             except (ValueError, ZeroDivisionError, TypeError):
                 return float("inf")
-        body.sort(key=pm2)
-        out = [HEADER] + body
+        out = [HEADER] + sorted(out[1:], key=pm2)
 
+    # highlight rows by final position: bare ownership (red) wins over auction (amber)
+    auction = [i + 1 for i, r in enumerate(out) if i and "asta" in str(r[1]).lower()]
+    nuda = [i + 1 for i, r in enumerate(out) if i and str(r[prop_i]).strip().lower() == "nuda"]
     n = len(out)
     sheets(tok, sid, f"/values/{args.tab}!A1:AD2000:clear", {}, "POST")
     sheets(tok, sid, f"/values/{args.tab}!A1?valueInputOption=USER_ENTERED",
@@ -378,9 +385,15 @@ def main():
             "endRowIndex": r, "startColumnIndex": 0, "endColumnIndex": NCOL},
             "cell": {"userEnteredFormat": {"backgroundColor": c(255, 217, 102)}},
             "fields": "userEnteredFormat.backgroundColor"}})
+    for r in nuda:  # after auction so bare-ownership red wins
+        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1,
+            "endRowIndex": r, "startColumnIndex": 0, "endColumnIndex": NCOL},
+            "cell": {"userEnteredFormat": {"backgroundColor": c(244, 199, 195)}},
+            "fields": "userEnteredFormat.backgroundColor"}})
     sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")
     print(f"{args.tab}: {len(urls)} listings, {enriched} enriched, "
-          f"{len(urls) - enriched} kept from tab, {len(auction)} auction highlighted")
+          f"{len(urls) - enriched} kept from tab, {len(auction)} auction, "
+          f"{len(nuda)} nuda proprietà highlighted")
 
 
 if __name__ == "__main__":
