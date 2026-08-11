@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""Decorate a curated listing tab in place with detail columns.
+"""Decorate a curated listing tab in place with detail and amenity columns.
 
-Reads the URLs already in the target tab (column A) and rewrites the tab in the
-14-column curated layout, filling condition, rooms, bathrooms, floor, sea and
-centre distance, a best-effort construction/renovation note, address and zona.
-The set of listings and their order are preserved; only columns are (re)built.
+Reads the URLs already in the target tab (column A) and rewrites it in the
+curated layout below. Auto columns are recomputed from immobiliare.it's search
+API on every run; manual columns are sticky, matched by URL, so human input
+(and Paola's notes) survives a refresh. Nothing is written to any immobiliare
+account.
 
-Details come from immobiliare.it's search API for the given city and category,
-matched by listing id. Listings absent from the current search (delisted) keep
-whatever title/price/surface/address the tab already held and get "n/d" for the
-rest. Nothing is written to any immobiliare account.
+Layout (A..W):
+  auto:   URL, Titolo, Prezzo (EUR), Superficie (m2), Condizione, Locali,
+          Bagni, Piano, Dist. mare (m), Dist. centro (m), Anno / ristrutt.,
+          Indirizzo / Zona, Zona, Esterni, Parcheggio, Arredato, Dotazioni
+  manual: Proprietà, Lavori, Adatto affitto, Stato, Note
+  tail:   Prezzo/m2
+
+`Lavori` is prefilled with "ristrutturazione" when the listing condition says
+so and the cell is empty; any manual edit then sticks.
 
 Usage:
-    python3 enrich.py --spreadsheet <ID|URL> --tab Commerciali \
-        --city Fano --category commercial --account you@example.com [--sort]
-
-Curated layout (columns A..N):
-    URL, Titolo, Prezzo (EUR), Superficie (m2), Condizione, Locali, Bagni,
-    Piano, Dist. mare (m), Dist. centro (m), Anno / ristrutt.,
-    Indirizzo / Zona, Zona, Prezzo/m2
+    python3 enrich.py --spreadsheet <ID|URL> --tab Appartamenti \
+        --city Fano --category residential --account you@example.com [--sort]
 """
 
 import argparse
@@ -33,13 +34,16 @@ API = "https://www.immobiliare.it/api-next/search-list/listings/"
 AUTOCOMPLETE = "https://www.immobiliare.it/api-next/geography/autocomplete/"
 UA = "Mozilla/5.0 (X11; Linux x86_64) listing-tracker-enrich/1.0"
 CATEGORIES = {"commercial": ("26", "negozi"), "residential": ("1", "case")}
-# Fano city centre (Piazza XX Settembre); override with --centre "lat,lon".
-DEFAULT_CENTRE = (43.8436, 13.0170)
-HEADER = [
+DEFAULT_CENTRE = (43.8436, 13.0170)  # Piazza XX Settembre, Fano
+
+AUTO_HEADER = [
     "URL", "Titolo", "Prezzo (EUR)", "Superficie (m2)", "Condizione", "Locali",
     "Bagni", "Piano", "Dist. mare (m)", "Dist. centro (m)", "Anno / ristrutt.",
-    "Indirizzo / Zona", "Zona", "Prezzo/m2",
+    "Indirizzo / Zona", "Zona", "Esterni", "Parcheggio", "Arredato", "Dotazioni",
 ]
+MANUAL_HEADER = ["Proprietà", "Lavori", "Adatto affitto", "Stato", "Note"]
+HEADER = AUTO_HEADER + MANUAL_HEADER + ["Prezzo/m2"]
+NCOL = len(HEADER)
 PM2_FORMULA = '=INDIRECT("C"&ROW())/INDIRECT("D"&ROW())'
 
 
@@ -112,6 +116,42 @@ def year_note(desc):
     return "; ".join(parts) or "n/d"
 
 
+def amenities(pr):
+    """Return (esterni, parcheggio, arredato, dotazioni) from feature fields."""
+    s = set()
+    for f in pr.get("ga4features") or []:
+        s.add(str(f).lower())
+    for f in pr.get("featureList") or []:
+        if isinstance(f, dict) and f.get("type"):
+            s.add(str(f["type"]).lower())
+    def any_of(*keys):
+        return bool(s & set(keys))
+    esterni = [n for n, k in (("terrazzo", ("terrazzo", "terrace")),
+                              ("balcone", ("balcone", "balcony")),
+                              ("giardino", ("giardino", "garden"))) if any_of(*k)]
+    park = []
+    if any_of("box", "garage"):
+        park.append("box")
+    if any_of("posto auto", "parking"):
+        park.append("posto auto")
+    if "parzialmente arredato" in s:
+        arred = "parziale"
+    elif any_of("arredato", "furniture"):
+        arred = "arredato"
+    else:
+        arred = ""
+    if "cucina" in s:
+        arred = (arred + "+cucina") if arred else "cucina"
+    dot = [n for n in ("ascensore", "cantina", "mansarda", "caminetto", "taverna",
+                       "fibra ottica", "porta blindata", "idromassaggio") if n in s]
+    if "elevator" in s and "ascensore" not in dot:
+        dot.insert(0, "ascensore")
+    if "basement" in s and "cantina" not in dot:
+        dot.append("cantina")
+    return (", ".join(esterni) or "no", " + ".join(park) or "no",
+            arred or "no", ", ".join(dot))
+
+
 def fetch_details(city, category, centre):
     idc, seg = CATEGORIES[category]
     region, prov, comune, keyurl = resolve_city(city)
@@ -119,7 +159,7 @@ def fetch_details(city, category, centre):
             "idContratto": "1", "idCategoria": idc, "__lang": "it",
             "paramsCount": "0", "path": f"/vendita-{seg}/{keyurl}/"}
     det = {}
-    page, seen, total = 1, 0, None
+    page, seen = 1, 0
     while True:
         p = dict(base, pag=str(page))
         try:
@@ -142,6 +182,7 @@ def fetch_details(city, category, centre):
             addr = ", ".join(x for x in (loc.get("address"), loc.get("macrozone"),
                                          loc.get("city")) if x)
             floor = pr.get("floor")
+            est, park, arred, dot = amenities(pr)
             det[str(re_["id"])] = {
                 "title": re_.get("title") or "n/a",
                 "price": price if price is not None else "n/a",
@@ -155,10 +196,10 @@ def fetch_details(city, category, centre):
                 "year": year_note(pr.get("description")),
                 "address": addr or "n/a",
                 "zona": loc.get("microzone") or loc.get("macrozone") or "n/d",
+                "esterni": est, "park": park, "arred": arred, "dot": dot,
             }
         seen += len(d.get("results", []))
-        total = d.get("totalAds")
-        if not d.get("results") or seen >= (total or 0):
+        if not d.get("results") or seen >= (d.get("totalAds") or 0):
             break
         page += 1
     return det
@@ -168,6 +209,26 @@ def listing_id(url):
     return str(url).rstrip("/").rsplit("/", 1)[-1]
 
 
+def read_existing(tok, sid, tab):
+    """Return (ordered urls, {url: {manual header: value}})."""
+    rows = sheets(tok, sid, f"/values/{tab}!A1:AD2000"
+                  "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
+    if not rows:
+        return [], {}
+    header = [str(h).strip() for h in rows[0]]
+    idx = {h: i for i, h in enumerate(header)}
+    manual_idx = {h: idx[h] for h in MANUAL_HEADER if h in idx}
+    urls, manual = [], {}
+    for r in rows[1:]:
+        if not r or "immobiliare.it/annunci" not in str(r[0]):
+            continue
+        u = r[0]
+        urls.append(u)
+        manual[u] = {h: (str(r[i]) if i < len(r) and r[i] not in (None, "") else "")
+                     for h, i in manual_idx.items()}
+    return urls, manual
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--spreadsheet", required=True)
@@ -175,7 +236,7 @@ def main():
     ap.add_argument("--city", required=True)
     ap.add_argument("--category", choices=sorted(CATEGORIES), required=True)
     ap.add_argument("--account", default="")
-    ap.add_argument("--centre", default="", help='"lat,lon" city centre override')
+    ap.add_argument("--centre", default="")
     ap.add_argument("--sort", action="store_true", help="sort by price per m2")
     args = ap.parse_args()
 
@@ -186,41 +247,31 @@ def main():
     tok = token(args.account)
     sh = sheet_id(tok, sid, args.tab)
 
-    rows = sheets(tok, sid, f"/values/{args.tab}!A1:N1000"
-                  "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
-    # existing base values keyed by id, for listings the search no longer returns
-    fallback = {}
-    urls = []
-    for i, r in enumerate(rows):
-        if i == 0 and r and str(r[0]).strip().upper() == "URL":
-            continue
-        if not r or "immobiliare.it/annunci" not in str(r[0]):
-            continue
-        r = list(r) + [""] * (14 - len(r))
-        urls.append(r[0])
-        fallback[listing_id(r[0])] = {
-            "title": r[1], "price": r[2], "surface": r[3],
-            "address": r[11] if r[11] else "n/a",
-        }
-
+    urls, manual = read_existing(tok, sid, args.tab)
     det = fetch_details(args.city, args.category, centre)
+
     out, enriched, auction = [HEADER], 0, []
     for u in urls:
-        lid = listing_id(u)
-        d = det.get(lid)
+        d = det.get(listing_id(u))
+        man = manual.get(u, {})
         if d:
             enriched += 1
-        else:
-            b = fallback.get(lid, {})
-            d = {"title": b.get("title", "n/a"), "price": b.get("price", "n/a"),
-                 "surface": b.get("surface", "n/a"), "cond": "n/d", "rooms": "",
-                 "bath": "", "floor": "", "sea": "", "centre": "", "year": "n/d",
-                 "address": b.get("address", "n/a"), "zona": "n/d"}
-        if "asta" in str(d["title"]).lower():
-            auction.append(len(out) + 1)
-        out.append([u, d["title"], d["price"], d["surface"], d["cond"], d["rooms"],
+            base = [u, d["title"], d["price"], d["surface"], d["cond"], d["rooms"],
                     d["bath"], d["floor"], d["sea"], d["centre"], d["year"],
-                    d["address"], d["zona"], PM2_FORMULA])
+                    d["address"], d["zona"], d["esterni"], d["park"], d["arred"], d["dot"]]
+            cond = d["cond"]
+        else:
+            base = [u, man.get("_title", "n/a")] + ["n/d"] * 15
+            cond = ""
+        lavori = man.get("Lavori", "")
+        if not lavori and "ristruttur" in cond.lower():
+            lavori = "ristrutturazione"
+        manvals = [man.get("Proprietà", ""), lavori, man.get("Adatto affitto", ""),
+                   man.get("Stato", ""), man.get("Note", "")]
+        row = base + manvals + [PM2_FORMULA]
+        if "asta" in str(base[1]).lower():
+            auction.append(len(out) + 1)
+        out.append(row)
 
     if args.sort:
         body = out[1:]
@@ -233,49 +284,46 @@ def main():
         out = [HEADER] + body
 
     n = len(out)
-    sheets(tok, sid, f"/values/{args.tab}!A1:Z1000:clear", {}, "POST")
+    sheets(tok, sid, f"/values/{args.tab}!A1:AD2000:clear", {}, "POST")
     sheets(tok, sid, f"/values/{args.tab}!A1?valueInputOption=USER_ENTERED",
            {"values": out}, "PUT")
 
     def c(r, g, b):
         return {"red": r / 255, "green": g / 255, "blue": b / 255}
-
+    pm2_col = NCOL - 1
     meta = sheets(tok, sid, "?fields=sheets(properties(sheetId),bandedRanges(bandedRangeId))")
     bands = [b["bandedRangeId"] for s in meta["sheets"]
              if s["properties"]["sheetId"] == sh for b in s.get("bandedRanges", [])]
     reqs = [{"deleteBanding": {"bandedRangeId": b}} for b in bands]
     reqs += [
         {"updateSheetProperties": {"properties": {"sheetId": sh,
-            "gridProperties": {"frozenRowCount": 1}},
-            "fields": "gridProperties.frozenRowCount"}},
+            "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
         {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": n,
-            "startColumnIndex": 0, "endColumnIndex": 14},
+            "startColumnIndex": 0, "endColumnIndex": NCOL},
             "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER",
                 "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}},
             "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)"}},
         {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": 1,
-            "startColumnIndex": 0, "endColumnIndex": 14},
+            "startColumnIndex": 0, "endColumnIndex": NCOL},
             "cell": {"userEnteredFormat": {"backgroundColor": c(31, 41, 55),
                 "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
             "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
         {"addBanding": {"bandedRange": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": 14},
+            "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": NCOL},
             "rowProperties": {"firstBandColor": c(255, 255, 255),
                 "secondBandColor": c(238, 242, 247)}}}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "startColumnIndex": 2, "endColumnIndex": 3},
-            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY",
-                "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "startColumnIndex": 13, "endColumnIndex": 14},
-            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY",
-                "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}},
+        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1, "startColumnIndex": 2,
+            "endColumnIndex": 3}, "cell": {"userEnteredFormat": {"numberFormat":
+            {"type": "CURRENCY", "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}},
+        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1, "startColumnIndex": pm2_col,
+            "endColumnIndex": pm2_col + 1}, "cell": {"userEnteredFormat": {"numberFormat":
+            {"type": "CURRENCY", "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}},
         {"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
-            "startColumnIndex": 0, "endColumnIndex": 14}}}},
+            "startColumnIndex": 0, "endColumnIndex": NCOL}}}},
     ]
     for r in auction:
         reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1,
-            "endRowIndex": r, "startColumnIndex": 0, "endColumnIndex": 14},
+            "endRowIndex": r, "startColumnIndex": 0, "endColumnIndex": NCOL},
             "cell": {"userEnteredFormat": {"backgroundColor": c(255, 217, 102)}},
             "fields": "userEnteredFormat.backgroundColor"}})
     sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")

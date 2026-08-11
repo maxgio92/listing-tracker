@@ -93,6 +93,9 @@ python3 enrich.py --spreadsheet <ID|URL> --tab Commerciali \
     --city Fano --category commercial --account you@example.com --sort
 ```
 
-Detail comes from the search API matched by listing id; delisted listings keep
-whatever the tab already held and get "n/d" for the rest. Distances are
-straight-line to the city centre (override with --centre "lat,lon").
+Detail comes from the search API matched by listing id. Auto columns
+(condition, distances, amenities: Esterni, Parcheggio, Arredato, Dotazioni)
+are recomputed every run; manual columns (Proprietà, Lavori, Adatto affitto,
+Stato, Note) are sticky, matched by URL, so human input survives a refresh.
+Distances are straight-line to the city centre (override with --centre
+"lat,lon").
