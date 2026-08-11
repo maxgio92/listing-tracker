@@ -195,3 +195,15 @@ regeneration, so decisions are not lost when the buckets rebuild.
 Marking a listing "scartare" in the Stato dropdown moves its URL to the
 Ignorati tab on the next review run (with reason "scartato in review"), so it
 drops out of the buckets permanently, the same as a manual reject.
+
+### Readability
+
+The listing tabs share one readable layout (in refresh.py's HEADER and
+format_listing_sheet, reused by review.py): a lean left block (clickable
+Titolo, Zona, Prezzo, Superficie, Costo tot./m2, Prezzo/m2, Manutenzione,
+Stato) with the raw URL hidden and the title as a HYPERLINK; a collapsible
+detail group for the rest; green→red color scales on Costo tot./m2, Prezzo/m2,
+Payback (low = good) and Rendita lorda % (high = good); the first columns and
+header frozen; euro/percent/km number formats; and a Stato dropdown. Tabs are
+colour-coded (green favourites, blue review buckets, grey feeds, red Ignorati,
+amber reference) and a Legenda tab documents every colour and column.

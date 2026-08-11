@@ -7,15 +7,13 @@ API on every run; manual columns are sticky, matched by URL, so human input
 (and Paola's notes) survives a refresh. Nothing is written to any immobiliare
 account.
 
-Layout (A..W):
-  auto:   URL, Titolo, Prezzo (EUR), Superficie (m2), Condizione, Locali,
-          Bagni, Piano, Dist. mare (m), Dist. centro (m), Anno / ristrutt.,
-          Indirizzo / Zona, Zona, Esterni, Parcheggio, Arredato, Dotazioni
-  manual: Proprietà, Lavori, Adatto affitto, Stato, Note
-  tail:   Prezzo/m2
-
-`Lavori` is prefilled with "ristrutturazione" when the listing condition says
-so and the cell is empty; any manual edit then sticks.
+Layout: a lean decision block (URL hidden, clickable Titolo, Zona, Prezzo,
+Superficie, Costo tot./m2, Prezzo/m2, Manutenzione, Stato) followed by a
+collapsible detail block (condition, tier, yield, distances, amenities,
+subdivision, price history, manual notes). Column order lives in HEADER; all
+code looks columns up by name. Styling (freeze, hidden URL, color scales,
+number formats, banding, Stato dropdown, collapsible group) is applied by
+format_listing_sheet, shared with review.py.
 
 Usage:
     python3 refresh.py --spreadsheet <ID|URL> --tab Appartamenti \
@@ -38,14 +36,28 @@ UA = "Mozilla/5.0 (X11; Linux x86_64) listing-tracker-refresh/1.0"
 CATEGORIES = {"commercial": ("26", "negozi"), "residential": ("1", "case")}
 DEFAULT_CENTRE = (43.8436, 13.0170)  # Piazza XX Settembre, Fano
 
-AUTO_HEADER = [
-    "URL", "Titolo", "Prezzo (EUR)", "Superficie (m2)", "Condizione", "Locali",
-    "Bagni", "Piano", "Dist. mare (m)", "Dist. centro (m)", "Anno / ristrutt.",
-    "Indirizzo / Zona", "Zona", "Zona turistica", "Esterni", "Parcheggio",
-    "Arredato", "Dotazioni", "Frazionabile", "Manutenzione", "Costo lavori (EUR)",
-    "Costo totale (EUR)", "Costo tot./m2", "Prezzo vs zona %", "Rendita lorda %",
-    "Payback anni", "Var. prezzo", "Primo avvist.", "Novità",
+# Lean decision block first (URL is kept but hidden), then a collapsible
+# detail block. Column order here drives the sheet; code looks columns up by
+# name, so this list is the single place that defines layout.
+LEAN = [
+    "URL", "Titolo", "Zona", "Prezzo (EUR)", "Superficie (m2)",
+    "Costo tot./m2", "Prezzo/m2", "Manutenzione", "Stato",
 ]
+DETAIL = [
+    "Condizione", "Zona turistica", "Rendita lorda %", "Payback anni",
+    "Prezzo vs zona %", "Costo totale (EUR)", "Costo lavori (EUR)", "Locali",
+    "Bagni", "Piano", "Dist. mare (m)", "Dist. centro (km)", "Esterni",
+    "Parcheggio", "Arredato", "Dotazioni", "Frazionabile", "Anno / ristrutt.",
+    "Var. prezzo", "Primo avvist.", "Novità", "Proprietà", "Adatto affitto", "Note",
+]
+HEADER = LEAN + DETAIL
+NCOL = len(HEADER)
+# columns the user edits; preserved by URL across refreshes
+MANUAL_HEADER = ["Stato", "Proprietà", "Adatto affitto", "Note"]
+# collapsible detail range and the euro/percent/gradient format groups
+GROUP_FIRST, GROUP_LAST = HEADER.index("Condizione"), HEADER.index("Novità")
+EURO_COLS = ["Prezzo (EUR)", "Costo tot./m2", "Prezzo/m2", "Costo totale (EUR)",
+             "Costo lavori (EUR)"]
 
 # Fano microzones by tourist tier (used for rental-rate assumptions)
 TIER_MARE = {"sassonia", "lido", "baia metauro", "metaurilia - tombaccia",
@@ -60,10 +72,22 @@ def zona_tier(zona):
     if z in TIER_CENTRO:
         return "centro"
     return "interno"
-MANUAL_HEADER = ["Proprietà", "Lavori", "Adatto affitto", "Stato", "Note"]
-HEADER = AUTO_HEADER + MANUAL_HEADER + ["Prezzo/m2"]
-NCOL = len(HEADER)
-PM2_FORMULA = '=INDIRECT("C"&ROW())/INDIRECT("D"&ROW())'
+
+
+def arg_sep(tok, sid):
+    """Formula argument separator for the spreadsheet locale (';' for locales
+    that use a comma decimal, like it_IT; ',' for en)."""
+    try:
+        loc = sheets(tok, sid, "?fields=properties.locale")["properties"].get("locale", "")
+    except Exception:
+        loc = ""
+    return "," if loc.startswith("en") else ";"
+
+
+def hyperlink(url, title, sep=";"):
+    """A HYPERLINK formula so the title is clickable and the raw URL can hide."""
+    t = str(title).replace('"', "'")
+    return f'=HYPERLINK("{url}"{sep}"{t}")'
 
 
 def token(account):
@@ -414,6 +438,136 @@ def read_existing(tok, sid, tab):
     return urls, manual, prev
 
 
+STATO_OPTIONS = ["da vedere", "da contattare", "visita fissata", "visitato",
+                 "interessante", "scartare"]
+
+
+def _rgb(r, g, b):
+    return {"red": r / 255, "green": g / 255, "blue": b / 255}
+
+
+def format_listing_sheet(tok, sid, sh, header, n, auction=(), nuda=(),
+                         extra_rows=None):
+    """Apply the shared readable layout to a listing sheet. Idempotent: existing
+    banding, conditional rules, and column groups are cleared first so daily
+    re-runs do not stack them. extra_rows is an optional list of (row_1based,
+    col_index, color) cell tints applied last (e.g. per-bucket good-deal marks)."""
+    idx = {h: i for i, h in enumerate(header)}
+    NC = len(header)
+    green, red, white = _rgb(76, 175, 80), _rgb(229, 115, 115), _rgb(255, 255, 255)
+
+    meta = sheets(tok, sid, "?fields=sheets(properties(sheetId),bandedRanges(bandedRangeId),"
+                  "columnGroups(range(sheetId,dimension,startIndex,endIndex)))")
+    smeta = next(s for s in meta["sheets"] if s["properties"]["sheetId"] == sh)
+    reqs = [{"deleteBanding": {"bandedRangeId": b["bandedRangeId"]}}
+            for b in smeta.get("bandedRanges", [])]
+    for g in smeta.get("columnGroups", []):
+        reqs.append({"deleteDimensionGroup": {"range": g["range"]}})
+    # clear all existing conditional-format rules on this sheet (delete top-down)
+    cfmeta = sheets(tok, sid, "?fields=sheets(properties(sheetId),conditionalFormats)")
+    ncf = next((len(s.get("conditionalFormats", [])) for s in cfmeta["sheets"]
+                if s["properties"]["sheetId"] == sh), 0)
+    for i in range(ncf - 1, -1, -1):
+        reqs.append({"deleteConditionalFormatRule": {"sheetId": sh, "index": i}})
+
+    def col(name):
+        return idx[name]
+
+    reqs += [
+        {"updateSheetProperties": {"properties": {"sheetId": sh, "gridProperties":
+            {"frozenRowCount": 1, "frozenColumnCount": 3}},
+            "fields": "gridProperties(frozenRowCount,frozenColumnCount)"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sh, "dimension": "COLUMNS",
+            "startIndex": col("URL"), "endIndex": col("URL") + 1},
+            "properties": {"hiddenByUser": True, "pixelSize": 40}, "fields": "hiddenByUser,pixelSize"}},
+        {"updateDimensionProperties": {"range": {"sheetId": sh, "dimension": "COLUMNS",
+            "startIndex": col("Titolo"), "endIndex": col("Titolo") + 1},
+            "properties": {"pixelSize": 320}, "fields": "pixelSize"}},
+        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": n,
+            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
+            {"horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}},
+            "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)"}},
+        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": 1,
+            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
+            {"backgroundColor": _rgb(31, 41, 55), "textFormat": {"bold": True,
+             "foregroundColor": white}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+        {"addBanding": {"bandedRange": {"range": {"sheetId": sh, "startRowIndex": 1,
+            "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": NC},
+            "rowProperties": {"firstBandColor": white, "secondBandColor": _rgb(238, 242, 247)}}}},
+        {"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
+            "startColumnIndex": 0, "endColumnIndex": NC}}}},
+    ]
+    # left-align the clickable title
+    reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1, "endRowIndex": n,
+        "startColumnIndex": col("Titolo"), "endColumnIndex": col("Titolo") + 1},
+        "cell": {"userEnteredFormat": {"horizontalAlignment": "LEFT"}},
+        "fields": "userEnteredFormat.horizontalAlignment"}})
+
+    def num_format(name, pattern, ftype="NUMBER"):
+        if name not in idx:
+            return
+        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1, "endRowIndex": n,
+            "startColumnIndex": idx[name], "endColumnIndex": idx[name] + 1},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": ftype, "pattern": pattern}}},
+            "fields": "userEnteredFormat.numberFormat"}})
+    for name in EURO_COLS:
+        num_format(name, "€ #,##0", "CURRENCY")
+    num_format("Rendita lorda %", '0.0"%"')
+    num_format("Prezzo vs zona %", '0"%"')
+    num_format("Payback anni", '0.0" a"')
+    num_format("Dist. centro (km)", '0.0" km"')
+
+    def gradient(name, good):
+        if name not in idx:
+            return
+        lo, hi = (green, red) if good == "low" else (red, green)
+        reqs.append({"addConditionalFormatRule": {"index": 0, "rule": {
+            "ranges": [{"sheetId": sh, "startRowIndex": 1, "endRowIndex": n,
+                        "startColumnIndex": idx[name], "endColumnIndex": idx[name] + 1}],
+            "gradientRule": {"minpoint": {"color": lo, "type": "MIN"},
+                             "midpoint": {"color": white, "type": "PERCENTILE", "value": "50"},
+                             "maxpoint": {"color": hi, "type": "MAX"}}}}})
+    gradient("Costo tot./m2", "low")
+    gradient("Prezzo/m2", "low")
+    gradient("Payback anni", "low")
+    gradient("Rendita lorda %", "high")
+
+    if "Stato" in idx and n > 1:
+        reqs.append({"setDataValidation": {"range": {"sheetId": sh, "startRowIndex": 1,
+            "endRowIndex": n, "startColumnIndex": idx["Stato"], "endColumnIndex": idx["Stato"] + 1},
+            "rule": {"condition": {"type": "ONE_OF_LIST",
+                "values": [{"userEnteredValue": o} for o in STATO_OPTIONS]},
+                "showCustomUi": True, "strict": False}}})
+
+    # collapsible detail group
+    reqs.append({"addDimensionGroup": {"range": {"sheetId": sh, "dimension": "COLUMNS",
+        "startIndex": GROUP_FIRST, "endIndex": GROUP_LAST + 1}}})
+
+    for r in auction:
+        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1, "endRowIndex": r,
+            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
+            {"backgroundColor": _rgb(255, 217, 102)}}, "fields": "userEnteredFormat.backgroundColor"}})
+    for r in nuda:
+        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1, "endRowIndex": r,
+            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
+            {"backgroundColor": _rgb(244, 199, 195)}}, "fields": "userEnteredFormat.backgroundColor"}})
+    for (r, ci, color) in (extra_rows or []):
+        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1, "endRowIndex": r,
+            "startColumnIndex": ci, "endColumnIndex": ci + 1}, "cell": {"userEnteredFormat":
+            {"backgroundColor": color, "textFormat": {"bold": True, "foregroundColor": white}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+
+    sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")
+    # collapse the detail group in a follow-up (needs the group to exist first)
+    try:
+        sheets(tok, sid, ":batchUpdate", {"requests": [{"updateDimensionGroup": {
+            "dimensionGroup": {"range": {"sheetId": sh, "dimension": "COLUMNS",
+                "startIndex": GROUP_FIRST, "endIndex": GROUP_LAST + 1}, "depth": 1,
+                "collapsed": True}, "fields": "collapsed"}}]}, "POST")
+    except urllib.error.HTTPError:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--spreadsheet", required=True)
@@ -442,6 +596,7 @@ def main():
     sid = parse_spreadsheet_id(args.spreadsheet)
     tok = token(args.account)
     sh = sheet_id(tok, sid, args.tab)
+    sep = arg_sep(tok, sid)
 
     tab_urls, manual, prev = read_existing(tok, sid, args.tab)
     if args.from_search:
@@ -499,12 +654,24 @@ def main():
             nov = ""
         return primo, nov
 
-    prop_i = HEADER.index("Proprietà")
-    out, enriched = [HEADER], 0
+    def pm2_value(price, surface):
+        try:
+            return round(float(price) / float(surface))
+        except (ValueError, TypeError, ZeroDivisionError):
+            return ""
+
+    rows, enriched = [], 0
+    auction_urls, nuda_urls = set(), set()
     for u in urls:
         d = det.get(listing_id(u))
         man = manual.get(u, {})
         primo, novita = first_seen_novita(u)
+        row = {h: "" for h in HEADER}
+        row["URL"] = u
+        row["Stato"] = man.get("Stato", "")
+        row["Adatto affitto"] = man.get("Adatto affitto", "")
+        row["Note"] = man.get("Note", "")
+        row["Primo avvist."], row["Novità"] = primo, novita
         if d:
             enriched += 1
             level, works, total, totm2 = cost_estimate(
@@ -515,97 +682,68 @@ def main():
             except (ValueError, TypeError, ZeroDivisionError, KeyError):
                 vs = ""
             yld, payback = yield_payback(total, tier, d["surface"])
-            var = price_change(prev.get(u, {}).get("price"), d["price"])
-            base = [u, d["title"], d["price"], d["surface"], d["cond"], d["rooms"],
-                    d["bath"], d["floor"], d["sea"], d["centre"], d["year"],
-                    d["address"], d["zona"], tier, d["esterni"], d["park"], d["arred"], d["dot"],
-                    d["fraz"], level, works, total, totm2, vs, yld, payback, var, primo, novita]
+            try:
+                centre_km = round(float(d["centre"]) / 1000, 1)
+            except (ValueError, TypeError):
+                centre_km = ""
+            if "asta" in str(d["title"]).lower():
+                auction_urls.add(u)
+            row.update({
+                "Titolo": hyperlink(u, d["title"], sep), "Zona": d["zona"],
+                "Prezzo (EUR)": d["price"], "Superficie (m2)": d["surface"],
+                "Costo tot./m2": totm2, "Prezzo/m2": pm2_value(d["price"], d["surface"]),
+                "Manutenzione": level, "Condizione": d["cond"], "Zona turistica": tier,
+                "Rendita lorda %": yld, "Payback anni": payback, "Prezzo vs zona %": vs,
+                "Costo totale (EUR)": total, "Costo lavori (EUR)": works,
+                "Locali": d["rooms"], "Bagni": d["bath"], "Piano": d["floor"],
+                "Dist. mare (m)": d["sea"], "Dist. centro (km)": centre_km,
+                "Esterni": d["esterni"], "Parcheggio": d["park"], "Arredato": d["arred"],
+                "Dotazioni": d["dot"], "Frazionabile": d["fraz"],
+                "Anno / ristrutt.": d["year"],
+                "Var. prezzo": price_change(prev.get(u, {}).get("price"), d["price"]),
+            })
             mlevel = level
         else:
-            base = ([u, man.get("_title", "n/a")] + ["n/d"] * 24 + ["", primo, novita])
+            row["Titolo"] = hyperlink(u, man.get("_title", "n/a"), sep)
+            for h in DETAIL:
+                if h not in ("Var. prezzo", "Primo avvist.", "Novità",
+                             "Proprietà", "Adatto affitto", "Note"):
+                    row[h] = "n/d"
+            for h in ("Zona", "Prezzo (EUR)", "Superficie (m2)", "Costo tot./m2",
+                      "Prezzo/m2", "Manutenzione"):
+                row[h] = "n/d"
             mlevel = ""
-        # prefill Lavori with the specific maintenance level (ordinaria vs
-        # straordinaria), not a generic word; nessuna/renovated leaves it blank
-        lavori = man.get("Lavori", "")
-        if lavori == "ristrutturazione":  # legacy generic auto value, replace
-            lavori = ""
-        if not lavori and mlevel.rstrip("?") in ("ordinaria", "straordinaria"):
-            lavori = mlevel.rstrip("?")
-        # bare ownership: auto from the listing text or from a manual note
+        # bare ownership: auto from listing text or a manual note
         proprieta = man.get("Proprietà", "")
         if not proprieta and ((d and d.get("proprieta") == "nuda")
                               or "nuda pro" in man.get("Note", "").lower()):
             proprieta = "nuda"
-        manvals = [proprieta, lavori, man.get("Adatto affitto", ""),
-                   man.get("Stato", ""), man.get("Note", "")]
-        out.append(base + manvals + [PM2_FORMULA])
+        row["Proprietà"] = proprieta
+        if proprieta == "nuda":
+            nuda_urls.add(u)
+        rows.append(row)
 
     sort_by = args.sort_by or ("price-m2" if args.sort else "")
     if sort_by:
-        totm2_i = HEADER.index("Costo tot./m2")
         def key(row):
             try:
                 if sort_by == "total-m2":
-                    return float(row[totm2_i])
-                return float(row[2]) / float(row[3])
+                    return float(row["Costo tot./m2"])
+                return float(row["Prezzo (EUR)"]) / float(row["Superficie (m2)"])
             except (ValueError, ZeroDivisionError, TypeError):
                 return float("inf")  # unknowns sort last
-        out = [HEADER] + sorted(out[1:], key=key)
+        rows.sort(key=key)
 
-    # highlight rows by final position: bare ownership (red) wins over auction (amber)
-    auction = [i + 1 for i, r in enumerate(out) if i and "asta" in str(r[1]).lower()]
-    nuda = [i + 1 for i, r in enumerate(out) if i and str(r[prop_i]).strip().lower() == "nuda"]
+    out = [HEADER] + [[r[h] for h in HEADER] for r in rows]
+    url_i = HEADER.index("URL")
+    auction = [i + 1 for i, r in enumerate(rows, 1) if r["URL"] in auction_urls]
+    nuda = [i + 1 for i, r in enumerate(rows, 1) if r["URL"] in nuda_urls]
     n = len(out)
     sheets(tok, sid, f"/values/{args.tab}!A1:AZ2000:clear", {}, "POST")
     sheets(tok, sid, f"/values/{args.tab}!A1?valueInputOption=USER_ENTERED",
            {"values": out}, "PUT")
 
-    def c(r, g, b):
-        return {"red": r / 255, "green": g / 255, "blue": b / 255}
-    pm2_col = NCOL - 1
-    meta = sheets(tok, sid, "?fields=sheets(properties(sheetId),bandedRanges(bandedRangeId))")
-    bands = [b["bandedRangeId"] for s in meta["sheets"]
-             if s["properties"]["sheetId"] == sh for b in s.get("bandedRanges", [])]
-    reqs = [{"deleteBanding": {"bandedRangeId": b}} for b in bands]
-    reqs += [
-        {"updateSheetProperties": {"properties": {"sheetId": sh,
-            "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": n,
-            "startColumnIndex": 0, "endColumnIndex": NCOL},
-            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER",
-                "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}},
-            "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": 1,
-            "startColumnIndex": 0, "endColumnIndex": NCOL},
-            "cell": {"userEnteredFormat": {"backgroundColor": c(31, 41, 55),
-                "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
-        {"addBanding": {"bandedRange": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": NCOL},
-            "rowProperties": {"firstBandColor": c(255, 255, 255),
-                "secondBandColor": c(238, 242, 247)}}}},
-        {"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
-            "startColumnIndex": 0, "endColumnIndex": NCOL}}}},
-    ]
-    # euro format on price, the two cost columns, cost/m2, and price/m2
-    euro_cols = [2, HEADER.index("Costo lavori (EUR)"), HEADER.index("Costo totale (EUR)"),
-                 HEADER.index("Costo tot./m2"), pm2_col]
-    for cidx in euro_cols:
-        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "startColumnIndex": cidx, "endColumnIndex": cidx + 1},
-            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY",
-                "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}})
-    for r in auction:
-        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1,
-            "endRowIndex": r, "startColumnIndex": 0, "endColumnIndex": NCOL},
-            "cell": {"userEnteredFormat": {"backgroundColor": c(255, 217, 102)}},
-            "fields": "userEnteredFormat.backgroundColor"}})
-    for r in nuda:  # after auction so bare-ownership red wins
-        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1,
-            "endRowIndex": r, "startColumnIndex": 0, "endColumnIndex": NCOL},
-            "cell": {"userEnteredFormat": {"backgroundColor": c(244, 199, 195)}},
-            "fields": "userEnteredFormat.backgroundColor"}})
-    sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")
+    format_listing_sheet(tok, sid, sh, HEADER, n, auction, nuda)
     print(f"{args.tab}: {len(urls)} listings, {enriched} enriched, "
           f"{len(urls) - enriched} kept from tab, {len(auction)} auction, "
           f"{len(nuda)} nuda proprietà highlighted")

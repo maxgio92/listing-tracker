@@ -11,7 +11,10 @@ ownership, auctions), then split the rest by maintenance level into three tabs:
 
 Costs differ by bucket (ready = price + agency; works add on top), so each tab
 is sorted by all-in cost per m2 and the good-deal mark (green Costo tot./m2) is
-the cheapest quartile within that bucket. Outdoor space stays tinted green.
+the cheapest quartile within that bucket. Layout and styling are shared with
+refresh.py. Review decisions in the Stato column (and Note, Adatto affitto) are
+preserved by URL across regeneration; marking "scartare" moves the listing to
+the ignore tab.
 
 Usage:
     python3 review.py --spreadsheet <ID|URL> --source Appartamenti-ricerca \
@@ -19,42 +22,24 @@ Usage:
 """
 
 import argparse
-import json
-import statistics
-import subprocess
 import urllib.request
 
-PM2_FORMULA = '=INDIRECT("C"&ROW())/INDIRECT("D"&ROW())'
+import refresh  # shared layout, formatting, and helpers
+
 BUCKETS = ("pronti", "ordinaria", "straordinaria")
-# review-decision fields tracked in the bucket tabs and preserved across runs
 STICKY = ("Stato", "Note", "Adatto affitto")
-STATO_OPTIONS = ["da vedere", "da contattare", "visita fissata", "visitato",
-                 "interessante", "scartare"]
+GOOD_DEAL = refresh._rgb(76, 175, 80)
+
+sheets = refresh.sheets
 
 
-def token(account):
-    args = ["gcloud", "auth", "print-access-token"] + ([account] if account else [])
-    out = subprocess.run(args, capture_output=True, text=True)
-    if out.returncode != 0:
-        raise SystemExit("gcloud token failed; run: gcloud auth login "
-                         "--enable-gdrive-access\n" + out.stderr.strip())
-    return out.stdout.strip()
-
-
-def sheets(tok, sid, path, body=None, method="GET"):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        f"https://sheets.googleapis.com/v4/spreadsheets/{sid}{path}",
-        data=data, method=method,
-        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-    )
-    return json.load(urllib.request.urlopen(req))
-
-
-def parse_spreadsheet_id(s):
-    if "/d/" in s:
-        return s.split("/d/", 1)[1].split("/")[0].split("?")[0].split("#")[0]
-    return s
+def bucket_of(man):
+    m = str(man).strip().lower()
+    if m == "nessuna":
+        return "pronti"
+    if m.startswith("straordinaria"):
+        return "straordinaria"
+    return "ordinaria"  # ordinaria, ordinaria?, unknown -> light-works bucket
 
 
 def tab_ids(tok, sid):
@@ -62,16 +47,7 @@ def tab_ids(tok, sid):
             for s in sheets(tok, sid, "?fields=sheets.properties")["sheets"]}
 
 
-def ensure_tab(tok, sid, title, ids):
-    if title in ids:
-        return ids[title]
-    rep = sheets(tok, sid, ":batchUpdate",
-                 {"requests": [{"addSheet": {"properties": {"title": title}}}]}, "POST")
-    return rep["replies"][0]["addSheet"]["properties"]["sheetId"]
-
-
 def sticky_map(tok, sid, tab):
-    """Read review-decision fields (STICKY) keyed by URL from an existing tab."""
     try:
         rows = sheets(tok, sid, f"/values/{tab}!A1:AZ4000"
                       "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
@@ -92,87 +68,6 @@ def sticky_map(tok, sid, tab):
     return out
 
 
-def bucket_of(man):
-    m = str(man).strip().lower()
-    if m == "nessuna":
-        return "pronti"
-    if m.startswith("straordinaria"):
-        return "straordinaria"
-    return "ordinaria"  # ordinaria, ordinaria?, unknown -> light-works bucket
-
-
-def write_bucket(tok, sid, tab, ids, H, rows, idx, PM2, EST, TM):
-    sh = ensure_tab(tok, sid, tab, ids)
-    sheets(tok, sid, f"/values/{tab}!A1:AZ4000:clear", {}, "POST")
-    sheets(tok, sid, f"/values/{tab}!A1?valueInputOption=USER_ENTERED",
-           {"values": [H] + rows}, "PUT")
-    n, NC = len(rows) + 1, len(H)
-
-    def c(r, g, b):
-        return {"red": r / 255, "green": g / 255, "blue": b / 255}
-    euro = [idx["Prezzo (EUR)"], idx["Costo lavori (EUR)"], idx["Costo totale (EUR)"],
-            idx["Costo tot./m2"], PM2]
-    meta = sheets(tok, sid, "?fields=sheets(properties(sheetId),bandedRanges(bandedRangeId))")
-    bands = [b["bandedRangeId"] for s in meta["sheets"]
-             if s["properties"]["sheetId"] == sh for b in s.get("bandedRanges", [])]
-    reqs = [{"deleteBanding": {"bandedRangeId": b}} for b in bands]
-    reqs += [
-        {"updateSheetProperties": {"properties": {"sheetId": sh,
-            "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": n,
-            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
-            {"horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}},
-            "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 0, "endRowIndex": 1,
-            "startColumnIndex": 0, "endColumnIndex": NC}, "cell": {"userEnteredFormat":
-            {"backgroundColor": c(31, 41, 55), "textFormat": {"bold": True,
-             "foregroundColor": c(255, 255, 255)}}},
-            "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
-    ]
-    if n > 1:
-        reqs.append({"addBanding": {"bandedRange": {"range": {"sheetId": sh,
-            "startRowIndex": 1, "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": NC},
-            "rowProperties": {"firstBandColor": c(255, 255, 255),
-             "secondBandColor": c(238, 242, 247)}}}})
-    reqs.append({"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
-        "startColumnIndex": 0, "endColumnIndex": NC}}}})
-    if "Stato" in idx and n > 1:  # decision dropdown on the Stato column
-        reqs.append({"setDataValidation": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "endRowIndex": n, "startColumnIndex": idx["Stato"], "endColumnIndex": idx["Stato"] + 1},
-            "rule": {"condition": {"type": "ONE_OF_LIST",
-                "values": [{"userEnteredValue": o} for o in STATO_OPTIONS]},
-                "showCustomUi": True, "strict": False}}})
-    for ci in euro:
-        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
-            "startColumnIndex": ci, "endColumnIndex": ci + 1}, "cell": {"userEnteredFormat":
-            {"numberFormat": {"type": "CURRENCY", "pattern": "€ #,##0"}}},
-            "fields": "userEnteredFormat.numberFormat"}})
-
-    def totm2(r):
-        try:
-            return float(r[TM])
-        except (ValueError, TypeError):
-            return float("inf")
-    tm_vals = sorted(v for v in (totm2(r) for r in rows) if v != float("inf"))
-    cutoff = tm_vals[int(0.25 * len(tm_vals))] if tm_vals else 0
-    deals = 0
-    for i, r in enumerate(rows, 2):
-        if str(r[EST]).strip().lower() not in ("", "no"):
-            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
-                "endRowIndex": i, "startColumnIndex": EST, "endColumnIndex": EST + 1},
-                "cell": {"userEnteredFormat": {"backgroundColor": c(212, 237, 218)}},
-                "fields": "userEnteredFormat.backgroundColor"}})
-        if totm2(r) <= cutoff:
-            deals += 1
-            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
-                "endRowIndex": i, "startColumnIndex": TM, "endColumnIndex": TM + 1},
-                "cell": {"userEnteredFormat": {"backgroundColor": c(76, 175, 80),
-                    "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
-                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
-    sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")
-    return len(rows), deals
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--spreadsheet", required=True)
@@ -180,13 +75,13 @@ def main():
     ap.add_argument("--prefix", default="Appartamenti")
     ap.add_argument("--preferiti", default="Appartamenti-preferiti")
     ap.add_argument("--ignore-tab", default="Ignorati")
-    ap.add_argument("--retire", default="Appartamenti-da-valutare",
-                    help="old combined tab to delete once split (blank to keep)")
+    ap.add_argument("--retire", default="Appartamenti-da-valutare")
     ap.add_argument("--account", default="")
     args = ap.parse_args()
 
-    sid = parse_spreadsheet_id(args.spreadsheet)
-    tok = token(args.account)
+    sid = refresh.parse_spreadsheet_id(args.spreadsheet)
+    tok = refresh.token(args.account)
+    sep = refresh.arg_sep(tok, sid)
 
     def urls_in(tab):
         try:
@@ -198,12 +93,10 @@ def main():
     pref_urls = urls_in(args.preferiti)
     ignore_urls = urls_in(args.ignore_tab)
 
-    # preserve review decisions made in the bucket tabs across regeneration
     preserved = {}
     for b in BUCKETS:
         preserved.update(sticky_map(tok, sid, f"{args.prefix}-{b}"))
 
-    # listings marked "scartare" move to the ignore tab and drop out of review
     scartare = {u for u, v in preserved.items()
                 if str(v.get("Stato", "")).strip().lower() == "scartare"}
     new_rejects = sorted(scartare - ignore_urls)
@@ -218,8 +111,8 @@ def main():
         raise SystemExit(f"source tab {args.source} is empty")
     H = v[0]
     idx = {h: i for i, h in enumerate(H)}
-    PROP, MAN, EST, TIT = idx["Proprietà"], idx["Manutenzione"], idx["Esterni"], idx["Titolo"]
-    TM, PM2 = idx["Costo tot./m2"], len(H) - 1
+    URL, TIT, PROP, MAN, TM = (idx["URL"], idx["Titolo"], idx["Proprietà"],
+                               idx["Manutenzione"], idx["Costo tot./m2"])
     sticky_idx = {f: idx[f] for f in STICKY if f in idx}
 
     def val(r, i):
@@ -229,21 +122,23 @@ def main():
     dropped = {"nuda": 0, "auction": 0, "preferiti/ignorati": 0}
     for r in v[1:]:
         r = list(r) + [""] * (len(H) - len(r))
-        if str(r[0]).rstrip("/") in subtract:
+        u = str(r[URL]).rstrip("/")
+        if u in subtract:
             dropped["preferiti/ignorati"] += 1
             continue
         if str(val(r, PROP)).strip().lower() == "nuda":
             dropped["nuda"] += 1
             continue
+        # title cell is a hyperlink formula; its plain value carries "asta"
         if "asta" in str(val(r, TIT)).lower():
             dropped["auction"] += 1
             continue
-        r[PM2] = PM2_FORMULA
-        # re-apply review decisions kept from the previous bucket tabs
-        prev = preserved.get(str(r[0]).rstrip("/"), {})
+        # rebuild the clickable title and re-apply preserved review decisions
+        r[TIT] = refresh.hyperlink(r[URL], r[TIT], sep)
+        pr = preserved.get(u, {})
         for f, i in sticky_idx.items():
-            if prev.get(f):
-                r[i] = prev[f]
+            if pr.get(f):
+                r[i] = pr[f]
         parts[bucket_of(val(r, MAN))].append(r)
 
     def totm2(r):
@@ -256,14 +151,23 @@ def main():
     summary = []
     for b in BUCKETS:
         rows = sorted(parts[b], key=totm2)
-        kept, deals = write_bucket(tok, sid, f"{args.prefix}-{b}", ids, H, rows, idx, PM2, EST, TM)
-        summary.append(f"{b}={kept} ({deals} deals)")
+        tab = f"{args.prefix}-{b}"
+        sh = ids[tab] if tab in ids else sheets(tok, sid, ":batchUpdate",
+            {"requests": [{"addSheet": {"properties": {"title": tab}}}]},
+            "POST")["replies"][0]["addSheet"]["properties"]["sheetId"]
+        sheets(tok, sid, f"/values/{tab}!A1:AZ4000:clear", {}, "POST")
+        sheets(tok, sid, f"/values/{tab}!A1?valueInputOption=USER_ENTERED",
+               {"values": [H] + rows}, "PUT")
+        tmv = sorted(v for v in (totm2(r) for r in rows) if v != float("inf"))
+        cutoff = tmv[int(0.25 * len(tmv))] if tmv else 0
+        extra = [(k + 2, TM, GOOD_DEAL) for k, r in enumerate(rows) if totm2(r) <= cutoff]
+        refresh.format_listing_sheet(tok, sid, sh, H, len(rows) + 1, extra_rows=extra)
+        summary.append(f"{b}={len(rows)} ({len(extra)} deals)")
 
-    if args.retire:
-        ids = tab_ids(tok, sid)
-        if args.retire in ids:
-            sheets(tok, sid, ":batchUpdate",
-                   {"requests": [{"deleteSheet": {"sheetId": ids[args.retire]}}]}, "POST")
+    ids = tab_ids(tok, sid)
+    if args.retire and args.retire in ids:
+        sheets(tok, sid, ":batchUpdate",
+               {"requests": [{"deleteSheet": {"sheetId": ids[args.retire]}}]}, "POST")
     moved = f", moved {len(new_rejects)} scartare -> {args.ignore_tab}" if new_rejects else ""
     print(f"{args.source} -> " + ", ".join(summary) + f"; dropped {dropped}{moved}")
 
