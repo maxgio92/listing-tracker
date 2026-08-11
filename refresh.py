@@ -40,6 +40,8 @@ AUTO_HEADER = [
     "URL", "Titolo", "Prezzo (EUR)", "Superficie (m2)", "Condizione", "Locali",
     "Bagni", "Piano", "Dist. mare (m)", "Dist. centro (m)", "Anno / ristrutt.",
     "Indirizzo / Zona", "Zona", "Esterni", "Parcheggio", "Arredato", "Dotazioni",
+    "Frazionabile", "Manutenzione", "Costo lavori (EUR)", "Costo totale (EUR)",
+    "Costo tot./m2",
 ]
 MANUAL_HEADER = ["Proprietà", "Lavori", "Adatto affitto", "Stato", "Note"]
 HEADER = AUTO_HEADER + MANUAL_HEADER + ["Prezzo/m2"]
@@ -185,7 +187,9 @@ def fetch_details(city, category, centre):
             est, park, arred, dot = amenities(pr)
             txt = " ".join(str(x or "") for x in (re_.get("title"), pr.get("caption"),
                                                   pr.get("description"))).lower()
+            typ = (re_.get("typology") or {}).get("name") or (pr.get("typology") or {}).get("name", "")
             det[str(re_["id"])] = {
+                "fraz": subdividable(re_.get("title") or "", typ, pr.get("surface") or ""),
                 "proprieta": "nuda" if "nuda pro" in txt else "",
                 "title": re_.get("title") or "n/a",
                 "price": price if price is not None else "n/a",
@@ -243,6 +247,105 @@ def research_urls(city, category, mx, mn_size, mn_rooms, mzona, quartiere, exclu
         page += 1
 
 
+def subdividable(title, typology, surface):
+    """Best-effort flag for splitting into 2-3 units, from typology and size.
+    Cannot see external buildings/dependance that live only in the (usually
+    absent) description; those need a manual note."""
+    t = f"{title} {typology}".lower()
+    try:
+        s = float(str(surface).replace("m²", "").strip().replace(".", "").replace(",", "."))
+    except (ValueError, TypeError):
+        s = 0
+    if "plurifamiliare" in t:
+        return "sì: plurifamiliare"
+    if "bifamiliare" in t:
+        return "sì: bifamiliare"
+    house = any(k in t for k in ("villa", "terratetto", "casale", "palazzo",
+                                 "rustico", "colonica", "indipendente", "cascina"))
+    levels = "più livelli" in t or "piu livelli" in t
+    if s >= 300 and (house or levels):
+        return "forse: ≥300 m²"
+    if s >= 180 and (house or levels):
+        return "forse: ≥180 m²"
+    if levels:
+        return "forse: più livelli"
+    return ""
+
+
+def reno_params(tok, sid):
+    """Read the Ristrutturazione parameter table; fall back to defaults if the
+    tab or a row is missing. Returns per-m2 and fixed renovation costs."""
+    p = {"ord_min": 500, "ord_max": 1000, "straord_m2": 2000,
+         "roof": 20000, "geom_oneri": 25000, "agency": 0.04}
+    try:
+        rows = sheets(tok, sid, "/values/Ristrutturazione!A1:C20"
+                      "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
+    except urllib.error.HTTPError:
+        return p
+    for r in rows:
+        if not r:
+            continue
+        label = str(r[0]).lower().strip()
+        # the parameter table is above the CALCOLO section; stop before it so
+        # the calculator's own rows are not mistaken for parameters
+        if label.startswith("calcolo"):
+            break
+        def num(i):
+            try:
+                return float(r[i])
+            except (IndexError, ValueError, TypeError):
+                return None
+        if label.startswith("manutenzione ordinaria"):
+            p["ord_min"], p["ord_max"] = num(1) or p["ord_min"], num(2) or p["ord_max"]
+        elif label.startswith("manutenzione straordinaria"):
+            p["straord_m2"] = num(1) or p["straord_m2"]
+        elif label.startswith("rifacimento tetto"):
+            p["roof"] = num(1) or p["roof"]
+        elif label.startswith("geometra + oneri"):
+            p["geom_oneri"] = num(1) or p["geom_oneri"]
+        elif label.startswith("commissione agenzia"):
+            p["agency"] = num(1) or p["agency"]
+    return p
+
+
+def maintenance_level(cond, year):
+    """Infer the maintenance scenario from condition and any renovation year.
+    Returns one of: nessuna, ordinaria, straordinaria; a trailing '?' marks a
+    guess made when the condition is unknown."""
+    c = (cond or "").lower()
+    y = (year or "").lower()
+    # "da ristrutturare" must be tested before the renovated/good branches,
+    # since it also contains the substring "ristruttur"
+    if "da ristruttur" in c:
+        return "straordinaria"
+    # a recent build or renovation (>= 2010) means little or no work
+    recent = bool(re.search(r"(ristrutturato|costr\.?)\s*(20[1-2]\d)", y))
+    if recent or "nuov" in c or "in costruzione" in c or "ristruttur" in c or "ottimo" in c:
+        return "nessuna"
+    if "buono" in c or "abitabile" in c or "discreto" in c:
+        return "ordinaria"
+    return "ordinaria?"  # unknown condition: assume light work, flagged as a guess
+
+
+def cost_estimate(cond, year, price, surface, p):
+    """Return (level, works_cost, total_cost, total_per_m2). Blank tuple when
+    price or surface is not numeric."""
+    try:
+        P, S = float(price), float(surface)
+    except (ValueError, TypeError):
+        return ("", "", "", "")
+    level = maintenance_level(cond, year)
+    base = level.rstrip("?")
+    if base == "straordinaria":
+        works = p["straord_m2"] * S + p["roof"] + p["geom_oneri"]
+    elif base == "ordinaria":
+        works = (p["ord_min"] + p["ord_max"]) / 2 * S  # midpoint of the range
+    else:
+        works = 0
+    total = P + p["agency"] * P + works
+    return (level, round(works), round(total), round(total / S) if S else "")
+
+
 def listing_id(url):
     return str(url).rstrip("/").rsplit("/", 1)[-1]
 
@@ -276,6 +379,8 @@ def main():
     ap.add_argument("--account", default="")
     ap.add_argument("--centre", default="")
     ap.add_argument("--sort", action="store_true", help="sort by price per m2")
+    ap.add_argument("--sort-by", choices=["price-m2", "total-m2"], default="",
+                    help="sort key; total-m2 ranks by all-in cost per m2")
     ap.add_argument("--from-search", action="store_true",
                     help="source listings from a filtered search, not the tab")
     ap.add_argument("--max-price", type=int, default=0)
@@ -304,6 +409,7 @@ def main():
     else:
         urls = tab_urls
     det = fetch_details(args.city, args.category, centre)
+    params = reno_params(tok, sid)
 
     prop_i = HEADER.index("Proprietà")
     out, enriched = [HEADER], 0
@@ -312,12 +418,15 @@ def main():
         man = manual.get(u, {})
         if d:
             enriched += 1
+            level, works, total, totm2 = cost_estimate(
+                d["cond"], d["year"], d["price"], d["surface"], params)
             base = [u, d["title"], d["price"], d["surface"], d["cond"], d["rooms"],
                     d["bath"], d["floor"], d["sea"], d["centre"], d["year"],
-                    d["address"], d["zona"], d["esterni"], d["park"], d["arred"], d["dot"]]
+                    d["address"], d["zona"], d["esterni"], d["park"], d["arred"], d["dot"],
+                    d["fraz"], level, works, total, totm2]
             cond = d["cond"]
         else:
-            base = [u, man.get("_title", "n/a")] + ["n/d"] * 15
+            base = [u, man.get("_title", "n/a")] + ["n/d"] * 20
             cond = ""
         lavori = man.get("Lavori", "")
         if not lavori and "ristruttur" in cond.lower():
@@ -331,13 +440,17 @@ def main():
                    man.get("Stato", ""), man.get("Note", "")]
         out.append(base + manvals + [PM2_FORMULA])
 
-    if args.sort:
-        def pm2(row):
+    sort_by = args.sort_by or ("price-m2" if args.sort else "")
+    if sort_by:
+        totm2_i = HEADER.index("Costo tot./m2")
+        def key(row):
             try:
+                if sort_by == "total-m2":
+                    return float(row[totm2_i])
                 return float(row[2]) / float(row[3])
             except (ValueError, ZeroDivisionError, TypeError):
-                return float("inf")
-        out = [HEADER] + sorted(out[1:], key=pm2)
+                return float("inf")  # unknowns sort last
+        out = [HEADER] + sorted(out[1:], key=key)
 
     # highlight rows by final position: bare ownership (red) wins over auction (amber)
     auction = [i + 1 for i, r in enumerate(out) if i and "asta" in str(r[1]).lower()]
@@ -371,15 +484,17 @@ def main():
             "endRowIndex": n, "startColumnIndex": 0, "endColumnIndex": NCOL},
             "rowProperties": {"firstBandColor": c(255, 255, 255),
                 "secondBandColor": c(238, 242, 247)}}}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1, "startColumnIndex": 2,
-            "endColumnIndex": 3}, "cell": {"userEnteredFormat": {"numberFormat":
-            {"type": "CURRENCY", "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}},
-        {"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1, "startColumnIndex": pm2_col,
-            "endColumnIndex": pm2_col + 1}, "cell": {"userEnteredFormat": {"numberFormat":
-            {"type": "CURRENCY", "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}},
         {"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
             "startColumnIndex": 0, "endColumnIndex": NCOL}}}},
     ]
+    # euro format on price, the two cost columns, cost/m2, and price/m2
+    euro_cols = [2, HEADER.index("Costo lavori (EUR)"), HEADER.index("Costo totale (EUR)"),
+                 HEADER.index("Costo tot./m2"), pm2_col]
+    for cidx in euro_cols:
+        reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
+            "startColumnIndex": cidx, "endColumnIndex": cidx + 1},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY",
+                "pattern": "€ #,##0"}}}, "fields": "userEnteredFormat.numberFormat"}})
     for r in auction:
         reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": r - 1,
             "endRowIndex": r, "startColumnIndex": 0, "endColumnIndex": NCOL},

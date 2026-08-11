@@ -117,3 +117,39 @@ python3 refresh.py --from-search --spreadsheet <ID> --tab Appartamenti-ricerca \
     --mzona 10775,10776,... --quartiere 14240,... \
     --exclude-zona "Centro Storico" --sort
 ```
+
+### Total cost of ownership
+
+refresh.py adds Manutenzione, Costo lavori (EUR), Costo totale (EUR), and
+Costo tot./m2, using the parameters read live from the Ristrutturazione tab
+(per-m2 ordinary/extraordinary rates, roof, geometra + oneri, agency %). The
+maintenance level is inferred from the listing condition and any renovation
+year: "Da ristrutturare" -> straordinaria; new or recently renovated (>=2010)
+or "Ottimo" -> nessuna; "Buono / Abitabile" -> ordinaria; unknown condition ->
+ordinaria with a "?" marker. Costo totale = price + agency + works, so a
+renovated home at a higher EUR/m2 can be cheaper all-in than a cheaper one
+needing straordinaria work. Edit the parameters in the Ristrutturazione tab
+and re-run to recompute. Use `--sort-by total-m2` to rank by all-in
+cost per m2 instead of sticker price (`--sort-by price-m2`, or `--sort`).
+
+### review.py: review shortlist
+
+`review.py` builds a review tab from an enriched tab: it drops the hard
+exclusions (nuda proprietà, auctions), keeps everything else including
+heavy-work listings, and sorts by all-in cost per m2. Heavy work is fine when
+the cost per m2 is low, so straordinaria rows are kept and flagged (orange
+Manutenzione cell), and outdoor space is marked as a plus (green Esterni
+cell). The daily cron runs it after the residential refresh.
+
+```sh
+python3 review.py --spreadsheet <ID> --source Appartamenti-ricerca \
+    --dest Appartamenti-da-valutare --account you@example.com
+```
+
+### Frazionabile (subdivision potential)
+
+refresh.py adds a Frazionabile column flagging structural potential to split
+into 2-3 units from typology and size: "sì" for plurifamiliare/bifamiliare,
+"forse" for large (>=180 or >=300 m2) houses or "su più livelli". External
+buildings or a dependance that live only in the (usually absent) description
+are not detected; note those manually.
