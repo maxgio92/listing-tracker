@@ -153,3 +153,8 @@ into 2-3 units from typology and size: "sì" for plurifamiliare/bifamiliare,
 "forse" for large (>=180 or >=300 m2) houses or "su più livelli". External
 buildings or a dependance that live only in the (usually absent) description
 are not detected; note those manually.
+
+review.py also marks value on the shortlist: the Costo tot./m2 cell is green
+for good deals (all-in cost per m2 in the cheapest quartile), and a "Pronto
+(<250k, no lavori)" column flags ready-to-use listings (no maintenance and
+price under 250k).

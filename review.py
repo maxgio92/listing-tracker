@@ -101,8 +101,22 @@ def main():
             return float("inf")  # unknown cost sorts last
     kept.sort(key=totm2)
 
+    # ready to use: no maintenance and price under the budget cap
+    price_i = idx["Prezzo (EUR)"]
+    ready_cap = 250000
+    H = H + ["Pronto (<250k, no lavori)"]
+    PRONTO = len(H) - 1
+    ready = 0
+    for r in kept:
+        try:
+            ok = str(val(r, MAN)).strip().lower() == "nessuna" and float(r[price_i]) < ready_cap
+        except (ValueError, TypeError):
+            ok = False
+        r.append("sì" if ok else "")
+        ready += ok
+
     sh = ensure_tab(tok, sid, args.dest)
-    sheets(tok, sid, f"/values/{args.dest}!A1:AA4000:clear", {}, "POST")
+    sheets(tok, sid, f"/values/{args.dest}!A1:AB4000:clear", {}, "POST")
     sheets(tok, sid, f"/values/{args.dest}!A1?valueInputOption=USER_ENTERED",
            {"values": [H] + kept}, "PUT")
 
@@ -140,6 +154,18 @@ def main():
             "startColumnIndex": ci, "endColumnIndex": ci + 1}, "cell": {"userEnteredFormat":
             {"numberFormat": {"type": "CURRENCY", "pattern": "€ #,##0"}}},
             "fields": "userEnteredFormat.numberFormat"}})
+    # good deal = all-in cost per m2 in the cheapest quartile of the shortlist
+    tm_vals = sorted(v for v in (totm2(r) for r in kept) if v != float("inf"))
+    cutoff = tm_vals[int(0.25 * len(tm_vals))] if tm_vals else 0
+    deals = 0
+    for i, r in enumerate(kept, 2):
+        if totm2(r) <= cutoff:
+            deals += 1
+            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
+                "endRowIndex": i, "startColumnIndex": TM, "endColumnIndex": TM + 1},
+                "cell": {"userEnteredFormat": {"backgroundColor": c(76, 175, 80),
+                    "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
     for i, r in enumerate(kept, 2):
         if str(val(r, EST)).strip().lower() not in ("", "no"):
             reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
@@ -151,8 +177,15 @@ def main():
                 "endRowIndex": i, "startColumnIndex": MAN, "endColumnIndex": MAN + 1},
                 "cell": {"userEnteredFormat": {"backgroundColor": c(255, 224, 178)}},
                 "fields": "userEnteredFormat.backgroundColor"}})
+        if r[PRONTO] == "sì":
+            reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": i - 1,
+                "endRowIndex": i, "startColumnIndex": PRONTO, "endColumnIndex": PRONTO + 1},
+                "cell": {"userEnteredFormat": {"backgroundColor": c(76, 175, 80),
+                    "textFormat": {"bold": True, "foregroundColor": c(255, 255, 255)}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
     sheets(tok, sid, ":batchUpdate", {"requests": reqs}, "POST")
-    print(f"{args.dest}: {len(kept)} listings from {args.source}, dropped {dropped}")
+    print(f"{args.dest}: {len(kept)} listings, {deals} good deals (<= €{cutoff:.0f}/m2 all-in), "
+          f"{ready} ready-to-use, dropped {dropped}")
 
 
 if __name__ == "__main__":
