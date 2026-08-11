@@ -26,6 +26,10 @@ import urllib.request
 
 PM2_FORMULA = '=INDIRECT("C"&ROW())/INDIRECT("D"&ROW())'
 BUCKETS = ("pronti", "ordinaria", "straordinaria")
+# review-decision fields tracked in the bucket tabs and preserved across runs
+STICKY = ("Stato", "Note", "Adatto affitto")
+STATO_OPTIONS = ["da vedere", "da contattare", "visita fissata", "visitato",
+                 "interessante", "scartare"]
 
 
 def token(account):
@@ -64,6 +68,28 @@ def ensure_tab(tok, sid, title, ids):
     rep = sheets(tok, sid, ":batchUpdate",
                  {"requests": [{"addSheet": {"properties": {"title": title}}}]}, "POST")
     return rep["replies"][0]["addSheet"]["properties"]["sheetId"]
+
+
+def sticky_map(tok, sid, tab):
+    """Read review-decision fields (STICKY) keyed by URL from an existing tab."""
+    try:
+        rows = sheets(tok, sid, f"/values/{tab}!A1:AZ4000"
+                      "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
+    except urllib.error.HTTPError:
+        return {}
+    if not rows:
+        return {}
+    hidx = {h: i for i, h in enumerate(rows[0])}
+    cols = {f: hidx[f] for f in STICKY if f in hidx}
+    out = {}
+    for r in rows[1:]:
+        if not r or "immobiliare.it/annunci" not in str(r[0]):
+            continue
+        vals = {f: (str(r[i]) if i < len(r) and r[i] not in (None, "") else "")
+                for f, i in cols.items()}
+        if any(vals.values()):
+            out[str(r[0]).rstrip("/")] = vals
+    return out
 
 
 def bucket_of(man):
@@ -110,6 +136,12 @@ def write_bucket(tok, sid, tab, ids, H, rows, idx, PM2, EST, TM):
              "secondBandColor": c(238, 242, 247)}}}})
     reqs.append({"setBasicFilter": {"filter": {"range": {"sheetId": sh, "startRowIndex": 0,
         "startColumnIndex": 0, "endColumnIndex": NC}}}})
+    if "Stato" in idx and n > 1:  # decision dropdown on the Stato column
+        reqs.append({"setDataValidation": {"range": {"sheetId": sh, "startRowIndex": 1,
+            "endRowIndex": n, "startColumnIndex": idx["Stato"], "endColumnIndex": idx["Stato"] + 1},
+            "rule": {"condition": {"type": "ONE_OF_LIST",
+                "values": [{"userEnteredValue": o} for o in STATO_OPTIONS]},
+                "showCustomUi": True, "strict": False}}})
     for ci in euro:
         reqs.append({"repeatCell": {"range": {"sheetId": sh, "startRowIndex": 1,
             "startColumnIndex": ci, "endColumnIndex": ci + 1}, "cell": {"userEnteredFormat":
@@ -165,6 +197,11 @@ def main():
 
     subtract = urls_in(args.preferiti) | urls_in(args.ignore_tab)
 
+    # preserve review decisions made in the bucket tabs across regeneration
+    preserved = {}
+    for b in BUCKETS:
+        preserved.update(sticky_map(tok, sid, f"{args.prefix}-{b}"))
+
     v = sheets(tok, sid, f"/values/{args.source}!A1:AZ2000"
                "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
     if not v:
@@ -173,6 +210,7 @@ def main():
     idx = {h: i for i, h in enumerate(H)}
     PROP, MAN, EST, TIT = idx["Proprietà"], idx["Manutenzione"], idx["Esterni"], idx["Titolo"]
     TM, PM2 = idx["Costo tot./m2"], len(H) - 1
+    sticky_idx = {f: idx[f] for f in STICKY if f in idx}
 
     def val(r, i):
         return r[i] if i < len(r) else ""
@@ -191,6 +229,11 @@ def main():
             dropped["auction"] += 1
             continue
         r[PM2] = PM2_FORMULA
+        # re-apply review decisions kept from the previous bucket tabs
+        prev = preserved.get(str(r[0]).rstrip("/"), {})
+        for f, i in sticky_idx.items():
+            if prev.get(f):
+                r[i] = prev[f]
         parts[bucket_of(val(r, MAN))].append(r)
 
     def totm2(r):

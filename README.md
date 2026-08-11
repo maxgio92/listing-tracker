@@ -186,3 +186,8 @@ refresh.py adds analytic columns per listing:
   last 7 days.
 
 Rental rates are assumptions; edit Affitto-parametri and re-run to recompute.
+
+Review decisions go in the Stato column of the bucket tabs (dropdown: da
+vedere, da contattare, visita fissata, visitato, interessante, scartare).
+review.py preserves Stato, Note, and Adatto affitto by URL across the daily
+regeneration, so decisions are not lost when the buckets rebuild.
