@@ -163,3 +163,20 @@ review.py subtracts listings already chosen (--preferiti, default
 Appartamenti-preferiti) or rejected (--ignore-tab, default Ignorati), so the
 review tab is ricerca minus preferiti minus to-exclude, minus the nuda/auction
 hard exclusions.
+
+### Market & rental insights
+
+refresh.py adds analytic columns per listing:
+- Zona turistica: tier (mare/centro/interno) driving rental assumptions.
+- Prezzo vs zona %: price/m2 versus the median of the same microzone
+  (negative = cheaper than its zone).
+- Rendita lorda % and Payback anni: gross yield and payback, from the
+  Affitto-parametri tab (nightly rate and occupancy per tier). Rental income
+  scales with size (~1 unit per 75 m2, capped at 4), so large or subdividable
+  properties are not penalised as a single unit.
+- Var. prezzo: price change since the previous refresh (motivated-seller
+  signal).
+- Primo avvist. / Novità: first-seen date and a flag for listings seen in the
+  last 7 days.
+
+Rental rates are assumptions; edit Affitto-parametri and re-run to recompute.

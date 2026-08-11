@@ -23,9 +23,11 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import math
 import re
+import statistics
 import subprocess
 import urllib.parse
 import urllib.request
@@ -39,10 +41,25 @@ DEFAULT_CENTRE = (43.8436, 13.0170)  # Piazza XX Settembre, Fano
 AUTO_HEADER = [
     "URL", "Titolo", "Prezzo (EUR)", "Superficie (m2)", "Condizione", "Locali",
     "Bagni", "Piano", "Dist. mare (m)", "Dist. centro (m)", "Anno / ristrutt.",
-    "Indirizzo / Zona", "Zona", "Esterni", "Parcheggio", "Arredato", "Dotazioni",
-    "Frazionabile", "Manutenzione", "Costo lavori (EUR)", "Costo totale (EUR)",
-    "Costo tot./m2",
+    "Indirizzo / Zona", "Zona", "Zona turistica", "Esterni", "Parcheggio",
+    "Arredato", "Dotazioni", "Frazionabile", "Manutenzione", "Costo lavori (EUR)",
+    "Costo totale (EUR)", "Costo tot./m2", "Prezzo vs zona %", "Rendita lorda %",
+    "Payback anni", "Var. prezzo", "Primo avvist.", "Novità",
 ]
+
+# Fano microzones by tourist tier (used for rental-rate assumptions)
+TIER_MARE = {"sassonia", "lido", "baia metauro", "metaurilia - tombaccia",
+             "torrette - ponte sasso", "gimarra"}
+TIER_CENTRO = {"centro storico", "centro - mare"}
+
+
+def zona_tier(zona):
+    z = (zona or "").strip().lower()
+    if z in TIER_MARE:
+        return "mare"
+    if z in TIER_CENTRO:
+        return "centro"
+    return "interno"
 MANUAL_HEADER = ["Proprietà", "Lavori", "Adatto affitto", "Stato", "Note"]
 HEADER = AUTO_HEADER + MANUAL_HEADER + ["Prezzo/m2"]
 NCOL = len(HEADER)
@@ -308,6 +325,29 @@ def reno_params(tok, sid):
     return p
 
 
+def rental_params(tok, sid):
+    """Read Affitto-parametri (tier -> nightly rate, occupancy%); defaults if
+    the tab is missing. Returns {tier: annual_income_per_unit_factor} as
+    (nightly, occupancy fraction)."""
+    p = {"mare": (100.0, 0.35), "centro": (85.0, 0.30), "interno": (65.0, 0.22)}
+    try:
+        rows = sheets(tok, sid, "/values/Affitto-parametri!A2:C10"
+                      "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
+    except urllib.error.HTTPError:
+        return p
+    for r in rows:
+        if not r:
+            continue
+        tier = str(r[0]).strip().lower()
+        if tier not in p:
+            continue
+        try:
+            p[tier] = (float(r[1]), float(r[2]) / 100.0)
+        except (IndexError, ValueError, TypeError):
+            pass
+    return p
+
+
 def maintenance_level(cond, year):
     """Infer the maintenance scenario from condition and any renovation year.
     Returns one of: nessuna, ordinaria, straordinaria; a trailing '?' marks a
@@ -351,15 +391,17 @@ def listing_id(url):
 
 
 def read_existing(tok, sid, tab):
-    """Return (ordered urls, {url: {manual header: value}})."""
-    rows = sheets(tok, sid, f"/values/{tab}!A1:AD2000"
+    """Return (ordered urls, {url: manual values}, {url: prev {price, primo}})."""
+    rows = sheets(tok, sid, f"/values/{tab}!A1:AZ2000"
                   "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
     if not rows:
-        return [], {}
+        return [], {}, {}
     header = [str(h).strip() for h in rows[0]]
     idx = {h: i for i, h in enumerate(header)}
     manual_idx = {h: idx[h] for h in MANUAL_HEADER if h in idx}
-    urls, manual = [], {}
+    price_i = idx.get("Prezzo (EUR)")
+    primo_i = idx.get("Primo avvist.")
+    urls, manual, prev = [], {}, {}
     for r in rows[1:]:
         if not r or "immobiliare.it/annunci" not in str(r[0]):
             continue
@@ -367,7 +409,9 @@ def read_existing(tok, sid, tab):
         urls.append(u)
         manual[u] = {h: (str(r[i]) if i < len(r) and r[i] not in (None, "") else "")
                      for h, i in manual_idx.items()}
-    return urls, manual
+        cell = lambda i: (r[i] if i is not None and i < len(r) else "")
+        prev[u] = {"price": cell(price_i), "primo": str(cell(primo_i) or "")}
+    return urls, manual, prev
 
 
 def main():
@@ -399,7 +443,7 @@ def main():
     tok = token(args.account)
     sh = sheet_id(tok, sid, args.tab)
 
-    tab_urls, manual = read_existing(tok, sid, args.tab)
+    tab_urls, manual, prev = read_existing(tok, sid, args.tab)
     if args.from_search:
         urls = research_urls(
             args.city, args.category, args.max_price, args.min_size, args.min_rooms,
@@ -410,23 +454,75 @@ def main():
         urls = tab_urls
     det = fetch_details(args.city, args.category, centre)
     params = reno_params(tok, sid)
+    rp = rental_params(tok, sid)
+    today = datetime.date.today()
+
+    # median price/m2 per zona, for the "Prezzo vs zona %" comparison
+    per_zona = {}
+    for u in urls:
+        d = det.get(listing_id(u))
+        if not d:
+            continue
+        try:
+            per_zona.setdefault(d["zona"], []).append(float(d["price"]) / float(d["surface"]))
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+    zmed = {z: statistics.median(v) for z, v in per_zona.items() if v}
+
+    def yield_payback(total, tier, surface):
+        # income scales with size: ~1 rentable unit per 75 m2, capped at 4
+        nightly, occ = rp.get(tier, rp["interno"])
+        try:
+            t, s = float(total), float(surface)
+        except (ValueError, TypeError):
+            return "", ""
+        units = max(1, min(4, round(s / 75)))
+        annual = nightly * 365 * occ * units
+        if not annual or not t:
+            return "", ""
+        return round(annual / t * 100, 1), round(t / annual, 1)
+
+    def price_change(old, new):
+        try:
+            o, nw = float(old), float(new)
+        except (ValueError, TypeError):
+            return ""
+        if not o or o == nw:
+            return ""
+        return f"{'▼' if nw < o else '▲'} {abs(int(nw - o))} (da {int(o)})"
+
+    def first_seen_novita(u):
+        primo = (prev.get(u, {}).get("primo") or "").strip() or today.isoformat()
+        try:
+            nov = "novità" if (today - datetime.date.fromisoformat(primo)).days <= 7 else ""
+        except ValueError:
+            nov = ""
+        return primo, nov
 
     prop_i = HEADER.index("Proprietà")
     out, enriched = [HEADER], 0
     for u in urls:
         d = det.get(listing_id(u))
         man = manual.get(u, {})
+        primo, novita = first_seen_novita(u)
         if d:
             enriched += 1
             level, works, total, totm2 = cost_estimate(
                 d["cond"], d["year"], d["price"], d["surface"], params)
+            tier = zona_tier(d["zona"])
+            try:
+                vs = round((float(d["price"]) / float(d["surface"]) / zmed[d["zona"]] - 1) * 100)
+            except (ValueError, TypeError, ZeroDivisionError, KeyError):
+                vs = ""
+            yld, payback = yield_payback(total, tier, d["surface"])
+            var = price_change(prev.get(u, {}).get("price"), d["price"])
             base = [u, d["title"], d["price"], d["surface"], d["cond"], d["rooms"],
                     d["bath"], d["floor"], d["sea"], d["centre"], d["year"],
-                    d["address"], d["zona"], d["esterni"], d["park"], d["arred"], d["dot"],
-                    d["fraz"], level, works, total, totm2]
+                    d["address"], d["zona"], tier, d["esterni"], d["park"], d["arred"], d["dot"],
+                    d["fraz"], level, works, total, totm2, vs, yld, payback, var, primo, novita]
             cond = d["cond"]
         else:
-            base = [u, man.get("_title", "n/a")] + ["n/d"] * 20
+            base = ([u, man.get("_title", "n/a")] + ["n/d"] * 24 + ["", primo, novita])
             cond = ""
         lavori = man.get("Lavori", "")
         if not lavori and "ristruttur" in cond.lower():
@@ -456,7 +552,7 @@ def main():
     auction = [i + 1 for i, r in enumerate(out) if i and "asta" in str(r[1]).lower()]
     nuda = [i + 1 for i, r in enumerate(out) if i and str(r[prop_i]).strip().lower() == "nuda"]
     n = len(out)
-    sheets(tok, sid, f"/values/{args.tab}!A1:AD2000:clear", {}, "POST")
+    sheets(tok, sid, f"/values/{args.tab}!A1:AZ2000:clear", {}, "POST")
     sheets(tok, sid, f"/values/{args.tab}!A1?valueInputOption=USER_ENTERED",
            {"values": out}, "PUT")
 

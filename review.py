@@ -83,7 +83,7 @@ def main():
 
     subtract = urls_in(args.preferiti) | urls_in(args.ignore_tab)
 
-    v = sheets(tok, sid, f"/values/{args.source}!A1:AA2000"
+    v = sheets(tok, sid, f"/values/{args.source}!A1:AZ2000"
                "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
     if not v:
         raise SystemExit(f"source tab {args.source} is empty")
@@ -132,7 +132,7 @@ def main():
         ready += ok
 
     sh = ensure_tab(tok, sid, args.dest)
-    sheets(tok, sid, f"/values/{args.dest}!A1:AB4000:clear", {}, "POST")
+    sheets(tok, sid, f"/values/{args.dest}!A1:AZ4000:clear", {}, "POST")
     sheets(tok, sid, f"/values/{args.dest}!A1?valueInputOption=USER_ENTERED",
            {"values": [H] + kept}, "PUT")
 
