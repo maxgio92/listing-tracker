@@ -191,3 +191,7 @@ Review decisions go in the Stato column of the bucket tabs (dropdown: da
 vedere, da contattare, visita fissata, visitato, interessante, scartare).
 review.py preserves Stato, Note, and Adatto affitto by URL across the daily
 regeneration, so decisions are not lost when the buckets rebuild.
+
+Marking a listing "scartare" in the Stato dropdown moves its URL to the
+Ignorati tab on the next review run (with reason "scartato in review"), so it
+drops out of the buckets permanently, the same as a manual reject.

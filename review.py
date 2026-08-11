@@ -195,12 +195,22 @@ def main():
             return set()
         return {r[0].rstrip("/") for r in rows if r and "immobiliare.it/annunci" in str(r[0])}
 
-    subtract = urls_in(args.preferiti) | urls_in(args.ignore_tab)
+    pref_urls = urls_in(args.preferiti)
+    ignore_urls = urls_in(args.ignore_tab)
 
     # preserve review decisions made in the bucket tabs across regeneration
     preserved = {}
     for b in BUCKETS:
         preserved.update(sticky_map(tok, sid, f"{args.prefix}-{b}"))
+
+    # listings marked "scartare" move to the ignore tab and drop out of review
+    scartare = {u for u, v in preserved.items()
+                if str(v.get("Stato", "")).strip().lower() == "scartare"}
+    new_rejects = sorted(scartare - ignore_urls)
+    if new_rejects:
+        sheets(tok, sid, f"/values/{args.ignore_tab}!A1:append?valueInputOption=USER_ENTERED",
+               {"values": [[u + "/", "scartato in review"] for u in new_rejects]}, "POST")
+    subtract = pref_urls | ignore_urls | scartare
 
     v = sheets(tok, sid, f"/values/{args.source}!A1:AZ2000"
                "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
@@ -254,7 +264,8 @@ def main():
         if args.retire in ids:
             sheets(tok, sid, ":batchUpdate",
                    {"requests": [{"deleteSheet": {"sheetId": ids[args.retire]}}]}, "POST")
-    print(f"{args.source} -> " + ", ".join(summary) + f"; dropped {dropped}")
+    moved = f", moved {len(new_rejects)} scartare -> {args.ignore_tab}" if new_rejects else ""
+    print(f"{args.source} -> " + ", ".join(summary) + f"; dropped {dropped}{moved}")
 
 
 if __name__ == "__main__":
