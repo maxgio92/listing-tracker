@@ -62,7 +62,7 @@ EURO_COLS = ["Prezzo (EUR)", "Costo tot./m2", "Prezzo/m2", "Costo totale (EUR)",
 # Fano microzones by tourist tier (used for rental-rate assumptions)
 TIER_MARE = {"sassonia", "lido", "baia metauro", "metaurilia - tombaccia",
              "torrette - ponte sasso", "gimarra"}
-TIER_CENTRO = {"centro storico", "centro - mare"}
+TIER_CENTRO = {"centro storico", "centro - mare", "ospedale"}
 
 
 def zona_tier(zona):
