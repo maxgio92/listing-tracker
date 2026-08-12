@@ -41,7 +41,7 @@ DEFAULT_CENTRE = (43.8436, 13.0170)  # Piazza XX Settembre, Fano
 # name, so this list is the single place that defines layout.
 LEAN = [
     "URL", "Titolo", "Zona", "Prezzo (EUR)", "Superficie (m2)",
-    "Costo tot./m2", "Prezzo/m2", "Manutenzione", "Stato",
+    "Costo tot./m2", "Prezzo/m2", "Manutenzione", "Unità", "Stato",
 ]
 DETAIL = [
     "Condizione", "Zona turistica", "Rendita lorda %", "Payback anni",
@@ -52,8 +52,10 @@ DETAIL = [
 ]
 HEADER = LEAN + DETAIL
 NCOL = len(HEADER)
-# columns the user edits; preserved by URL across refreshes
-MANUAL_HEADER = ["Stato", "Proprietà", "Adatto affitto", "Note"]
+# columns the user edits; preserved by URL across refreshes. "Unità" is
+# semi-manual: auto-estimated when blank, but an override sticks and then drives
+# both income and split cost.
+MANUAL_HEADER = ["Stato", "Proprietà", "Adatto affitto", "Note", "Unità"]
 # collapsible detail range and the euro/percent/gradient format groups
 GROUP_FIRST, GROUP_LAST = HEADER.index("Condizione"), HEADER.index("Novità")
 EURO_COLS = ["Prezzo (EUR)", "Costo tot./m2", "Prezzo/m2", "Costo totale (EUR)",
@@ -317,7 +319,7 @@ def reno_params(tok, sid):
     """Read the Ristrutturazione parameter table; fall back to defaults if the
     tab or a row is missing. Returns per-m2 and fixed renovation costs."""
     p = {"ord_min": 500, "ord_max": 1000, "straord_m2": 2000,
-         "roof": 20000, "geom_oneri": 25000, "agency": 0.04}
+         "roof": 20000, "geom_oneri": 25000, "agency": 0.04, "split_unit": 25000}
     try:
         rows = sheets(tok, sid, "/values/Ristrutturazione!A1:C20"
                       "?valueRenderOption=UNFORMATTED_VALUE").get("values", [])
@@ -346,6 +348,8 @@ def reno_params(tok, sid):
             p["geom_oneri"] = num(1) or p["geom_oneri"]
         elif label.startswith("commissione agenzia"):
             p["agency"] = num(1) or p["agency"]
+        elif label.startswith("frazionamento"):
+            p["split_unit"] = num(1) or p["split_unit"]
     return p
 
 
@@ -372,6 +376,22 @@ def rental_params(tok, sid):
     return p
 
 
+def estimate_units(surface, title):
+    """Best-effort number of independent apartments the property could become,
+    from walkable area (commercial m2 discounted ~20%) at ~55 m2 per unit, with
+    a floor for multi-family typologies. Change of use is assumed pursuable.
+    Overridable per row via the Unità column."""
+    try:
+        walk = float(surface) * 0.8
+    except (ValueError, TypeError):
+        return 1
+    u = max(1, round(walk / 55))
+    t = str(title).lower()
+    if "plurifamiliare" in t or "bifamiliare" in t:
+        u = max(u, 2)
+    return min(u, 4)
+
+
 def maintenance_level(cond, year):
     """Infer the maintenance scenario from condition and any renovation year.
     Returns one of: nessuna, ordinaria, straordinaria; a trailing '?' marks a
@@ -391,9 +411,10 @@ def maintenance_level(cond, year):
     return "ordinaria?"  # unknown condition: assume light work, flagged as a guess
 
 
-def cost_estimate(cond, year, price, surface, p):
-    """Return (level, works_cost, total_cost, total_per_m2). Blank tuple when
-    price or surface is not numeric."""
+def cost_estimate(cond, year, price, surface, p, units=1):
+    """Return (level, works_cost, total_cost, total_per_m2). Works include the
+    maintenance level plus the cost of creating each extra unit when units > 1.
+    Blank tuple when price or surface is not numeric."""
     try:
         P, S = float(price), float(surface)
     except (ValueError, TypeError):
@@ -406,6 +427,7 @@ def cost_estimate(cond, year, price, surface, p):
         works = (p["ord_min"] + p["ord_max"]) / 2 * S  # midpoint of the range
     else:
         works = 0
+    works += max(0, units - 1) * p["split_unit"]  # conversion cost per extra unit
     total = P + p["agency"] * P + works
     return (level, round(works), round(total), round(total / S) if S else "")
 
@@ -625,15 +647,14 @@ def main():
             pass
     zmed = {z: statistics.median(v) for z, v in per_zona.items() if v}
 
-    def yield_payback(total, tier, surface):
-        # income scales with size: ~1 rentable unit per 75 m2, capped at 4
+    def yield_payback(total, tier, units):
+        # income scales with the number of rentable units (see estimate_units)
         nightly, occ = rp.get(tier, rp["interno"])
         try:
-            t, s = float(total), float(surface)
+            t = float(total)
         except (ValueError, TypeError):
             return "", ""
-        units = max(1, min(4, round(s / 75)))
-        annual = nightly * 365 * occ * units
+        annual = nightly * 365 * occ * max(1, int(units))
         if not annual or not t:
             return "", ""
         return round(annual / t * 100, 1), round(t / annual, 1)
@@ -672,17 +693,24 @@ def main():
         row["Stato"] = man.get("Stato", "")
         row["Adatto affitto"] = man.get("Adatto affitto", "")
         row["Note"] = man.get("Note", "")
+        row["Unità"] = man.get("Unità", "")  # kept if delisted; recomputed below when enriched
         row["Primo avvist."], row["Novità"] = primo, novita
         if d:
             enriched += 1
+            # units: manual override wins, else the walkable-area estimate
+            try:
+                units = int(float(man.get("Unità", "")))
+            except (ValueError, TypeError):
+                units = estimate_units(d["surface"], d["title"])
+            row["Unità"] = units
             level, works, total, totm2 = cost_estimate(
-                d["cond"], d["year"], d["price"], d["surface"], params)
+                d["cond"], d["year"], d["price"], d["surface"], params, units)
             tier = zona_tier(d["zona"])
             try:
                 vs = round((float(d["price"]) / float(d["surface"]) / zmed[d["zona"]] - 1) * 100)
             except (ValueError, TypeError, ZeroDivisionError, KeyError):
                 vs = ""
-            yld, payback = yield_payback(total, tier, d["surface"])
+            yld, payback = yield_payback(total, tier, units)
             try:
                 centre_km = round(float(d["centre"]) / 1000, 1)
             except (ValueError, TypeError):

@@ -207,3 +207,14 @@ Payback (low = good) and Rendita lorda % (high = good); the first columns and
 header frozen; euro/percent/km number formats; and a Stato dropdown. Tabs are
 colour-coded (green favourites, blue review buckets, grey feeds, red Ignorati,
 amber reference) and a Legenda tab documents every colour and column.
+
+### Subdivision economics (Unità)
+
+Every apartment gets an Unità estimate: the number of independent apartments it
+could become, from walkable area (~1 per 55 m2 of commercial-discounted space,
+floored to 2 for multi-family typologies, capped at 4). It is load-bearing:
+rental income is multiplied by Unità, and works cost adds a per-extra-unit
+conversion cost (Ristrutturazione tab, "Frazionamento", default 25k EUR each,
+covering a second kitchen/bathroom/entrance and change of use). So Costo totale
+and Rendita both reflect the split. Unità is overridable per row (sticky) once
+you confirm the real number with the agent.
