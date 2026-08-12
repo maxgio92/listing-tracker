@@ -516,6 +516,7 @@ def format_listing_sheet(tok, sid, sh, header, n, auction=(), nuda=(),
     num_format("Prezzo vs zona %", '0"%"')
     num_format("Payback anni", '0.0" a"')
     num_format("Dist. centro (km)", '0.0" km"')
+    num_format("Primo avvist.", "yyyy-mm-dd", "DATE")
 
     def gradient(name, good):
         if name not in idx:
